@@ -1,0 +1,10 @@
+# 判定 L1 规则 v0 配置（契约 12 §11；预注册后数值不得改，新规则走追加）
+version: "v0"
+
+auth_fail_threshold: 3          # J1: 同簇认证失败达到该次数 → high（定向嫌疑）
+llm_valid_key_budget: mid       # J2: entry=llm 且 API key 有效 → mid
+default_budget: low
+
+# J3: llm 请求目标分类的关键词路由（确定性；匹配顺序 sensitive > doc > general）
+sensitive_keywords: ["薪资", "工资", "salary", "绩效", "薪酬表"]
+doc_keywords: ["手册", "文档", "handbook", "制度", "policy", "wiki", "指南"]

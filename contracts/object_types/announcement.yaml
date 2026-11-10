@@ -1,0 +1,7 @@
+# 实体类型注册表：announcement（契约 12 §13.2）
+type: announcement
+key_rule: "AN-{seq:04d}"
+payload_schema: announcement.schema.json
+constraints:
+  - owner_in_identity: {field: author}
+projection: oa-backend

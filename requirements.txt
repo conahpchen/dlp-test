@@ -1,0 +1,18 @@
+# 核心依赖（M0）
+jsonschema>=4.21
+PyYAML>=6.0
+
+# M1：AI 网关 :4000（OpenAI 兼容入口）
+fastapi>=0.110
+uvicorn>=0.29
+
+# 可选：Cowrie 事件桥接的 Redis 输出（内网部署用；缺省走文件模式）
+redis>=5.0
+
+# 可选：DWS Postgres 装载（内网/公网部署用；Windows 开发机无 Docker 时相关测试自动跳过）
+psycopg[binary]>=3.1
+
+# 开发/测试
+pytest>=8.0
+httpx>=0.25          # starlette TestClient 依赖（网关测试）
+

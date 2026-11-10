@@ -1,0 +1,17 @@
+# 实体类型注册表：ticket（契约 12 §13.2）
+type: ticket
+key_rule: "HD-{seq:04d}"
+payload_schema: ticket.schema.json
+constraints:
+  - status_machine:
+      field: status
+      states: [open, in_progress, resolved, closed]
+      transitions:
+        open: [in_progress, closed]
+        in_progress: [resolved, closed]
+        resolved: [closed, in_progress]   # reopen
+        closed: []
+constraints_validators:
+  - ref_exists: {field: assignee, type: identity, optional: true}
+  - ref_exists: {field: reporter, type: identity}
+projection: oa-backend

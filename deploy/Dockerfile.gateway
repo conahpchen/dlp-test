@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" psycopg
+COPY contracts/ contracts/
+COPY dws/ dws/
+COPY generation/ generation/
+COPY identity/ identity/
+COPY judgment/ judgment/
+COPY replay/ replay/
+COPY entries/ entries/
+COPY tests/fixtures/world_seed.demo.json tests/fixtures/world_seed.demo.json
+EXPOSE 4000
+CMD ["uvicorn", "entries.gateway.app:app", "--host", "0.0.0.0", "--port", "4000"]

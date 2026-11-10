@@ -1,0 +1,11 @@
+# Cowrie 配置增量（不覆盖镜像自带的主配置）
+# Cowrie 3.x 镜像布局：WORKDIR=/cowrie/cowrie-git，相对路径日志写在
+# /cowrie/cowrie-git/var/log/cowrie/（docker-compose.yml 已把数据卷挂到这里）。
+# 本文件以 cfg.d 增量方式被加载（官方镜像主配置保留默认）。
+
+[output_jsonlog]
+enabled = true
+logfile = var/log/cowrie/cowrie.json
+
+# 记录全部命令输入与登录尝试（M0 最小集依赖这五类事件）
+# userdb 默认即可：任意用户名/密码被接受（诱捕优先，05 §04 入口原则）

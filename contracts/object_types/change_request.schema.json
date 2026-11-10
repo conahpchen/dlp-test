@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "title",
+    "ticket",
+    "application",
+    "owner",
+    "plan",
+    "rollback",
+    "status"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "draft",
+        "tested",
+        "approved",
+        "deployed",
+        "rolled_back"
+      ]
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "plan": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 6000
+    },
+    "rollback": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 6000
+    }
+  }
+}

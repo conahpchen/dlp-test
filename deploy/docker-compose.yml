@@ -1,0 +1,87 @@
+# deploy/docker-compose.yml —— 两阶段共用的单机编排（13 §03）
+# 阶段一（内网 PoC）：HONEYNET_BIND 保持默认 127.0.0.1，全栈不出内网
+# 阶段二（公网）：compose.prod.yml 覆盖层 + 13 §3.3 迁移 checklist
+# 项目名用环境变量/命令行指定（兼容老版 compose）：docker compose -p honeynet up -d
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-honeynet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-honeynet}
+    volumes:
+      - ../dws/sql:/docker-entrypoint-initdb.d:ro   # 契约 12 §2 的 DDL 自动执行
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${HONEYNET_BIND:-127.0.0.1}:5432:5432"     # 仅控制面（12 §9）
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-honeynet}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${HONEYNET_BIND:-127.0.0.1}:6379:6379"     # 仅控制面
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  cowrie:
+    image: cowrie/cowrie:latest
+    ports:
+      - "${HONEYNET_BIND:-127.0.0.1}:2222:2222"     # SSH 诱捕（公网阶段唯一暴露面之一）
+      - "${HONEYNET_BIND:-127.0.0.1}:2223:2223"
+    volumes:
+      # Cowrie 3.x 布局：主目录 /cowrie/cowrie-git，日志在 var/log/cowrie/（相对 WORKDIR）
+      - ../entries/cowrie/cowrie.cfg.example:/cowrie/cowrie-git/etc/cowrie.cfg.d/mihoney.cfg:ro
+      - cowrie-var:/cowrie/cowrie-git/var/log/cowrie
+    # 出站默认拒绝在公网阶段的防火墙层强制（13 §3.3-3），容器侧再加 cap 降权
+
+  bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.bridge
+    command:
+      - python
+      - -m
+      - entries.cowrie.bridge
+      - --in
+      - /cowrie/cowrie-git/var/log/cowrie/cowrie.json
+      - --out
+      - /data/events.jsonl
+      - --follow
+      - --node
+      - sensor-a
+      - --dst-host
+      - web01
+    volumes:
+      - cowrie-var:/cowrie/cowrie-git/var/log/cowrie:ro
+      - ./bridge-out:/data
+    depends_on:
+      cowrie:
+        condition: service_started
+
+  # M1 起追加：AI 网关（OpenAI 兼容，公网第二暴露面）
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    command: ["uvicorn", "entries.gateway.app:app", "--host", "0.0.0.0", "--port", "4000"]
+    environment:
+      - GATEWAY_WORLD_SEED=/app/tests/fixtures/world_seed.demo.json
+      - HONEYNET_PG_DSN=${GATEWAY_PG_DSN:-}   # 可选：世界从 PG 加载；空则用 bundled 种子
+    ports:
+      - "${HONEYNET_BIND:-127.0.0.1}:4000:4000"     # 公网阶段唯一暴露面之二（12 §9）
+    depends_on:
+      postgres:
+        condition: service_started
+
+  # M1 后续/M3：llmrouter 判定接入（:4010/:8010，实现 JudgeBackend 接口即可替换 L1）
+  # classifier:
+  # judge:
+  # vllm:       # 远端 GPU 推理面（边缘无 key，12 §9）
+
+volumes:
+  pgdata:
+  cowrie-var:

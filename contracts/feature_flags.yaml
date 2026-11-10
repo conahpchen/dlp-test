@@ -1,0 +1,8 @@
+# 特性开关（契约 12 §13.4；默认值 + 评审开启记录；变更走变更日志）
+version: "v1.3"
+
+flags:
+  pseudo_exec_v2: false              # 伪执行器 v2 兜底：开启前三项评审（销毁/egress/FS 回归）
+  collision_same_host_visible: true  # 碰撞可见性灰度第一步：同主机可见
+  collision_auto_rollback: true      # 碰撞矛盾率超阈值自动回退可见性
+  analysis_llm_enhanced: false       # 分析 LLM 增强（规则版足够时不开）

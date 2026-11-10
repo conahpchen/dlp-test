@@ -1,0 +1,81 @@
+# 拟人 Agent 人格配置（契约 12 §13.3 审计一致性；14 号 §07.1/§07.2）
+# 纪律：不将密钥写入 profile（凭据由部署侧注入）；工具 allowlist 按岗位最小授权。
+# 基座 6 类 = 会议纪要口径（运维/开发/DBA/测试/业务运营/管理）。
+personas:
+  - agent_id: agent-ops-01
+    role: ops
+    username: ops01
+    display_name: 周岑
+    workstation_ip: 10.20.3.31
+    schedule:
+      windows: [["09:00", "12:00"], ["13:30", "18:00"]]
+    tools: [assets_view, ticket_list, ticket_comment, change_deploy]
+    state_tasks:
+      CHECKING: [ticket_list]
+      WORKING: [assets_view]
+      REPORTING: [ticket_comment]
+
+  - agent_id: agent-dev-01
+    role: dev
+    username: dev01
+    display_name: 林砚
+    workstation_ip: 10.20.3.32
+    schedule:
+      windows: [["10:00", "12:00"], ["13:30", "20:00"]]
+    tools: [ticket_list, ticket_read, ticket_comment, ticket_status, change_create]
+    state_tasks:
+      CHECKING: [ticket_list]
+      WORKING: [ticket_comment]
+      REPORTING: [ticket_status]
+
+  - agent_id: agent-dba-01
+    role: dba
+    username: dba01
+    display_name: 许宁
+    workstation_ip: 10.20.3.33
+    schedule:
+      windows: [["09:00", "18:00"]]
+    tools: [assets_view, ticket_comment, database_view]
+    state_tasks:
+      CHECKING: [assets_view]
+      WORKING: [ticket_comment]
+      REPORTING: [ticket_comment]
+
+  - agent_id: agent-test-01
+    role: test
+    username: test01
+    display_name: 陈曦
+    workstation_ip: 10.20.3.34
+    schedule:
+      windows: [["09:30", "18:30"]]
+    tools: [ticket_list, ticket_status, ticket_comment, change_test]
+    state_tasks:
+      CHECKING: [ticket_list]
+      WORKING: [ticket_status]
+      REPORTING: [ticket_comment]
+
+  - agent_id: agent-biz-01
+    role: biz
+    username: biz01
+    display_name: 苏禾
+    workstation_ip: 10.20.3.35
+    schedule:
+      windows: [["09:00", "18:00"]]
+    tools: [ticket_create, ticket_list, ticket_comment]
+    state_tasks:
+      CHECKING: [ticket_list]
+      WORKING: [ticket_create]
+      REPORTING: [ticket_comment]
+
+  - agent_id: agent-manager-01
+    role: manager
+    username: manager01
+    display_name: 沈知行
+    workstation_ip: 10.20.3.36
+    schedule:
+      windows: [["09:30", "18:00"]]
+    tools: [ticket_list, ticket_create, ticket_status, ticket_comment, change_approve]
+    state_tasks:
+      CHECKING: [ticket_list]
+      WORKING: [ticket_status]
+      REPORTING: [ticket_comment]

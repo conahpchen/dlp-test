@@ -1,0 +1,46 @@
+{
+  "modified": [
+    "README.md",
+    "agent_runtime/adapter.py",
+    "agent_runtime/workflow.py",
+    "business/app.py",
+    "business/templates/index.html",
+    "contracts/agent_personas.yaml",
+    "tests/test_agent_runtime.py",
+    "tests/test_business.py"
+  ],
+  "added": [
+    ".gitignore",
+    "business/enterprise.py",
+    "business/storage.py",
+    "contracts/object_types/announcement.schema.json",
+    "contracts/object_types/application.schema.json",
+    "contracts/object_types/application.yaml",
+    "contracts/object_types/change_request.schema.json",
+    "contracts/object_types/change_request.yaml",
+    "contracts/object_types/database.schema.json",
+    "contracts/object_types/database.yaml",
+    "contracts/object_types/document.schema.json",
+    "contracts/object_types/document.yaml",
+    "contracts/object_types/ticket.schema.json",
+    "docs/BUSINESS_UPGRADE.md",
+    "docs/screenshots/dashboard.png",
+    "docs/screenshots/ticket.png",
+    "tests/browser_smoke.cjs",
+    "tests/test_enterprise.py"
+  ],
+  "validation": {
+    "pytest_passed": 305,
+    "replay": "two runs byte-identical",
+    "http_workflow_steps": 7,
+    "agent_roles": 6,
+    "agent_events": 11,
+    "browser": "login, 8 modules, create, comment, zero page errors"
+  },
+  "not_validated": [
+    "Docker/Kubernetes deployment",
+    "OpenSandbox",
+    "11-node network",
+    "24-hour runtime"
+  ]
+}

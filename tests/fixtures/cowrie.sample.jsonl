@@ -1,0 +1,5 @@
+{"eventid": "cowrie.session.connect", "src_ip": "203.0.113.45", "dst_port": 2222, "session": "a1b2c3d4e5", "timestamp": "2026-10-23T09:00:00.000000Z", "message": "New connection: 203.0.113.45:51234 (web01:2222) [session: a1b2c3d4e5]"}
+{"eventid": "cowrie.login.failed", "src_ip": "203.0.113.45", "dst_port": 2222, "session": "a1b2c3d4e5", "timestamp": "2026-10-23T09:00:05.000000Z", "username": "root", "password": "toor", "message": "login attempt [root/toor] failed"}
+{"eventid": "cowrie.login.success", "src_ip": "203.0.113.45", "dst_port": 2222, "session": "a1b2c3d4e5", "timestamp": "2026-10-23T09:00:11.000000Z", "username": "deploy", "password": "S3cret!", "message": "login attempt [deploy/S3cret!] succeeded"}
+{"eventid": "cowrie.command.input", "src_ip": "203.0.113.45", "dst_port": 2222, "session": "a1b2c3d4e5", "timestamp": "2026-10-23T09:00:20.000000Z", "input": "uname -a", "message": "Command input: uname -a"}
+{"eventid": "cowrie.session.closed", "src_ip": "203.0.113.45", "dst_port": 2222, "session": "a1b2c3d4e5", "timestamp": "2026-10-23T09:01:00.000000Z", "message": "Connection lost after 60 seconds"}

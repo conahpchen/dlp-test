@@ -1,0 +1,3 @@
+type: document
+payload_schema: document.schema.json
+projection: oa-backend

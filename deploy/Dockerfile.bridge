@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir redis
+COPY contracts/ contracts/
+COPY dws/ dws/
+COPY generation/ generation/
+COPY identity/ identity/
+COPY entries/ entries/
+CMD ["python", "-m", "entries.cowrie.bridge", "--in", "/cowrie/cowrie-git/var/log/cowrie/cowrie.json", \
+     "--out", "/data/events.jsonl", "--follow"]

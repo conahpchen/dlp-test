@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+var/
+artifacts/
+
+# Local runtime data and diagnostic output
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+fh_all.txt

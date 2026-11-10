@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-mihoney/contracts/event.schema.v1.json",
+  "title": "honeynet.event.v1",
+  "type": "object",
+  "required": ["event_id", "ts_hlc", "entry", "node", "dst", "session", "attacker_id", "src", "who", "what", "verdict", "dws_version", "evidence_ref"],
+  "additionalProperties": false,
+  "properties": {
+    "event_id":       { "type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$" },
+    "ts_hlc":         { "type": "string", "pattern": "^[0-9]+\\.[0-9]{4}/[a-z0-9-]+$" },
+    "entry":          { "enum": ["ssh", "telnet", "web", "llm", "mcp", "agent"] },
+    "node":           { "type": "string", "minLength": 1 },
+    "dst":            { "type": "object", "required": ["host", "port"], "additionalProperties": false,
+                        "properties": { "host": {"type": "string"}, "port": {"type": "integer"} } },
+    "session":        { "type": "string", "minLength": 1 },
+    "attacker_id":    { "type": ["string", "null"] },
+    "src":            { "type": "object", "required": ["ip"], "additionalProperties": true,
+                        "properties": { "ip": {"type": "string"}, "ja3": {"type": "string"}, "asn": {"type": "integer"} } },
+    "who":            { "type": "object", "additionalProperties": false,
+                        "properties": { "user": {"type": ["string", "null"]}, "cred_hash": {"type": ["string", "null"]} } },
+    "what":           { "type": "object", "required": ["kind"], "additionalProperties": true,
+                        "properties": { "kind": {"type": "string"} } },
+    "verdict":        { "type": ["object", "null"], "additionalProperties": false,
+                        "properties": {
+                          "malicious": {"type": "number", "minimum": 0, "maximum": 1},
+                          "budget": {"enum": ["low", "mid", "high"]},
+                          "by": {"type": "string"},
+                          "latency_ms": {"type": "integer", "minimum": 0} } },
+    "dws_version":    { "type": ["integer", "null"], "minimum": 0 },
+    "evidence_ref":   { "type": "string", "minLength": 1 },
+    "world_id":       { "type": ["string", "null"] },
+    "correlation_id": { "type": ["string", "null"] }
+  }
+}

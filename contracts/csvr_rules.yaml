@@ -1,0 +1,45 @@
+# CSVR v0 判定规则配置
+# 契约依据: 12-开发契约 §4 (公式 / T,C,M,I 规则 / 申报约束)
+# 变更纪律: 权重与 ε 预注册后不得修改 (12 §10.3); 新增规则 = 追加条目 (允许); 修改既有规则语义 = 禁止
+
+version: "v0"
+weights:            # 公式 CSVR = Σ w_c · |contradictions_c| / |interactions|
+  T: 0.25
+  C: 0.25
+  M: 0.25
+  I: 0.25
+
+epsilon_hlc_ticks: 1   # M-2 时间倒挂容忍度 (HLC tick 数, 预注册)
+
+role_conflicts:        # I-1 互斥人格对 (可追加)
+  - [intern, dba]
+  - [auditor, sysadmin]
+  - [guest, sysadmin]
+
+rules:
+  T-1:
+    cls: T
+    desc: 参照的 host 在入口 A 无 relation 通路，却在入口 B 得到连接成功响应
+  T-2:
+    cls: T
+    desc: 参照的网段/主机在入口 A 的世界视图（≤pinned 交集）中不存在，却在 B 存在
+  C-1:
+    cls: C
+    desc: 同一 secret_hash 在入口 A 得到认证成功，在入口 B 得到 401/失败
+  C-2:
+    cls: C
+    desc: 同一 token/凭据在 A 的视图未吊销，在 B 的视图已吊销（双方 pinned 覆盖同一吊销版本）
+  M-1:
+    cls: M
+    desc: data.mtime_hlc < 安装/创建时间，或 > 世界当前 hlc
+  M-2:
+    cls: M
+    desc: 跨入口对同一 data 实体的 mtime 观测倒挂超过 ε
+  I-1:
+    cls: I
+    desc: 同一 attacker_id 在两个入口获得互斥 role/人格（无 role_binding 解释）
+
+reporting:
+  recall_interval_required: true   # 一切 CSVR 必附 recall 估计与区间; 只报点值视为无效 (12 §4.3)
+  capture_recapture:               # M2 起由两名标注员独立标注回填
+    annotators: 2

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "name",
+    "host",
+    "owner",
+    "application",
+    "tables"
+  ],
+  "properties": {
+    "tables": {
+      "type": "array"
+    },
+    "slow_queries": {
+      "type": "array"
+    }
+  }
+}

@@ -1,0 +1,3 @@
+type: application
+payload_schema: application.schema.json
+projection: oa-backend

@@ -1,0 +1,29 @@
+# deploy/compose.prod.yml —— 公网阶段覆盖层（docker compose -f docker-compose.yml -f compose.prod.yml up）
+# 配合 13 §3.3 迁移 checklist 执行；本文件只做形态覆盖，安全项在防火墙/加固脚本。
+
+services:
+  postgres:
+    ports: []            # 控制面端口不再映射到宿主（仅内网/VPN 访问）
+
+  redis:
+    ports: []
+
+  cowrie:
+    restart: always
+    ports:
+      - "0.0.0.0:2222:2222"   # 公网只暴露 2222（4000 网关 M1 加入）
+      - "0.0.0.0:2223:2223"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # T4 对策：容器资源配额（防诱饵被当跳板）
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  bridge:
+    restart: always
