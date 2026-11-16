@@ -25,6 +25,8 @@ def install_observer(app, lab_provider):
         session = request.cookies.get('research_session', '')
         if not re.fullmatch('[a-f0-9]{32}', session):
             session = secrets.token_hex(16)
+        from research.inputs import capture
+        visitor_input = await capture(request)
         policy = await run_in_threadpool(lab.policy, run, session)
         start = time.monotonic()
         if path == '/':
@@ -37,7 +39,7 @@ def install_observer(app, lab_provider):
                     query_keys=[k for k in request.query_params.keys() if re.fullmatch('[A-Za-z0-9_-]{1,32}', k)][:20],
                     auth_present=bool(request.headers.get('authorization')), path_hash=hashlib.sha256(path.encode()).hexdigest(),
                     probe=next((p for p in sorted(PROBES) if p in path.split('/')), None),
-                    duration_ms=round((time.monotonic()-start)*1000),
+                    input=visitor_input, duration_ms=round((time.monotonic()-start)*1000),
                     policy_revision=policy.get('revision', 0))
         try:
             await run_in_threadpool(lab.observe, run, session,

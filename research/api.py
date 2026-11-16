@@ -121,31 +121,61 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
 
     install_observer(app, current_lab)
 
-    @app.get('/decoy/{run_id}/{resource:path}')
-    def decoy(run_id: str, resource: str, request: Request):
+    @app.api_route('/decoy/{run_id}/{resource:path}', methods=['GET', 'POST'])
+    async def decoy(run_id: str, resource: str, request: Request):
+        from research.inputs import capture, clean_text
+        from starlette.concurrency import run_in_threadpool
+
         session = request.cookies.get('research_session', '')
         if not re.fullmatch('[a-f0-9]{32}', session):
             session = secrets.token_hex(16)
+        peer = request.client.host if request.client else 'unknown'
+        agent = request.headers.get('user-agent', '')[:256]
         try:
-            status, body = current_lab().visit(
-                run_id, resource, session,
-                request.client.host if request.client else 'unknown',
-                request.headers.get('user-agent', '')[:256])
+            lab = current_lab()
+            plan = await run_in_threadpool(lab.plan, run_id)
+            visitor_input = await capture(request)
+            is_input = (request.method == 'POST' or bool(visitor_input['query'])
+                        or resource.startswith('service/'))
+            enabled = os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1' if plan.get('origin') == 'ai' else '0') == '1'
+            outcome = None
+            if is_input:
+                await run_in_threadpool(lab.observe, run_id, session, peer, agent,
+                                       dict(kind='research.input', method=request.method,
+                                            resource=clean_text(resource)[:160], input=visitor_input))
+                if enabled and plan.get('origin') == 'ai':
+                    from research.controller import adapt
+                    from research.model import Model
+                    try:
+                        model = Model()
+                    except ValueError:
+                        model = None
+                    if model:
+                        outcome = await run_in_threadpool(adapt, lab, run_id, session, model, 1)
+            policy_now = await run_in_threadpool(lab.policy, run_id, session)
+            if resource == 'interact':
+                if request.method != 'POST':
+                    status, body = 405, dict(error='请提交查询内容')
+                elif not outcome or outcome['status'] != 'applied' or not policy_now.get('response_node'):
+                    status, body = 503, dict(error='当前查询暂无法完成')
+                else:
+                    status, body = await run_in_threadpool(lab.visit, run_id, 'scene/' + policy_now['response_node'], session, peer, agent)
+            else:
+                status, body = await run_in_threadpool(lab.visit, run_id, resource, session, peer, agent, request.method)
+            if enabled and not is_input:
+                from research.controller import adapt
+                from research.model import Model
+                try:
+                    model = Model()
+                except ValueError:
+                    model = None
+                if model:
+                    await run_in_threadpool(adapt, lab, run_id, session, model)
         except KeyError:
             return JSONResponse({'error': '接口不存在'}, status_code=404)
         except OverflowError:
             return JSONResponse({'error': '请求预算已用尽'}, status_code=429,
                                 headers={'Retry-After': '3600', 'Cache-Control': 'no-store'})
-        if os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1' if current_lab().plan(run_id).get('origin') == 'ai' else '0') == '1':
-            from research.controller import adapt
-            from research.model import Model
-
-            try:
-                adapt(current_lab(), run_id, session, Model())
-            except ValueError:
-                # Explicit configuration failure is visible on the control plane.
-                # Existing grounded responses remain available.
-                pass
         policy = current_lab().policy(run_id, session)
         scene = policy.get('scene')
         lead = None

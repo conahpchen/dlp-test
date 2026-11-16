@@ -2,6 +2,7 @@
 import hashlib
 import ipaddress
 import json
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -132,7 +133,7 @@ class ResearchLab:
         db.execute('INSERT INTO events(run,payload) VALUES (?,?)', (plan['run_id'], json.dumps(event)))
         return event
 
-    def visit(self, run, resource, session, peer, agent):
+    def visit(self, run, resource, session, peer, agent, method='GET'):
         with self.connect() as db:
             plan = self._plan(db, run)
             policy_row = db.execute('SELECT payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
@@ -143,7 +144,11 @@ class ResearchLab:
             what = dict(kind='research.visit', resource='other', policy_revision=policy.get('revision', 0))
             root = f'/decoy/{run}'
             scene = policy.get('scene') or plan.get('scene')
-            if scene and (resource == 'index' or resource.startswith('scene/')):
+            service = next((s for s in (scene or {}).get('services', [])
+                            if resource == 'service/' + s['path'] and s['method'] == method), None)
+            if service:
+                resource = 'scene/' + service['node_id']
+            if scene and (resource == 'index'  or resource.startswith('scene/')):
                 node_id = scene['entry_node'] if resource == 'index' else resource.removeprefix('scene/')
                 node = next((n for n in scene['nodes'] if n['id'] == node_id), None)
                 if node:
@@ -151,6 +156,7 @@ class ResearchLab:
                     token = secrets.token_urlsafe(24)
                     what.update(kind='research.delivery', resource='scene/' + node_id,
                                 node_id=node_id, offered_nodes=node['links'],
+                                service_id=service['id'] if service else None, input_event_id=policy.get('input_event_id'),
                                 fact_id=node['sources'][0]['fact_id'],
                                 source_fact_ids=[s['fact_id'] for s in node['sources']],
                                 origin='ai', variant=variant,
@@ -159,11 +165,17 @@ class ResearchLab:
                     db.execute('INSERT INTO exposures VALUES (?,?,?,?,?)',
                                (token, run, session, node['sources'][0]['fact_id'], event['event_id']))
                     by_id = {n['id']: n for n in scene['nodes']}
-                    result = dict(title=node['title'], content=node['body'],
+                    rendered_body = compile_service_paths(node['body'], scene.get('services', []), root)
+                    result = dict(title=node['title'], content=rendered_body,
                                   links=[dict(title=by_id[target]['title'], href=f'{root}/scene/{target}')
                                          for target in node['links']])
+                    if service:
+                        result['data'] = service['data']
+                    result['interaction'] = dict(method='POST', href=f'{root}/interact')
+                    result['services'] = [dict(method=s['method'], href=f"{root}/service/{s['path']}")
+                                          for s in scene.get('services', []) if s['node_id'] == node_id]
                     if node.get('lure_instruction'):
-                        result.update(maintenance_note=node['lure_instruction'], verification_link=f'{root}/beacon/{token}')
+                        result.update(maintenance_note=compile_service_paths(node['lure_instruction'], scene.get('services', []), root), verification_link=f'{root}/beacon/{token}')
                     return 200, result
             if resource == 'index' and not scene:
                 what['resource'] = 'index'
@@ -258,7 +270,18 @@ def engagement_metrics(events, plan):
                 model_transitions += 1
                 new_clues += int(node not in initial)
         previous[session] = what
-    return dict(session_depths={s:len(nodes) for s,nodes in seen.items()},
+    input_responses = {e['what']['input_event_id'] for e in events if e['what'].get('input_event_id') and e['what']['kind']=='research.delivery'}
+    return dict(input_turns=sum(e['what']['kind']=='research.input' for e in events),
+                input_turns_responded=len(input_responses),
+                simulated_service_deliveries=sum(bool(e['what'].get('service_id')) for e in events),
+                session_depths={s:len(nodes) for s,nodes in seen.items()},
                 guided_transitions=transitions, model_guided_transitions=model_transitions,
                 new_clues_followed=new_clues, updated_content_deliveries=updated,
                 sessions_continued_after_update=len(continued))
+
+
+def compile_service_paths(text, services, root):
+    for path in sorted({s['path'] for s in services}, key=len, reverse=True):
+        text = re.sub(r'(?<![a-zA-Z0-9_/-])/service/' + re.escape(path) + r'(?![a-z0-9/-])',
+                      lambda match: root + '/service/' + path, text)
+    return text

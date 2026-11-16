@@ -1,5 +1,7 @@
 # 澄川研发服务平台 · 蜜网业务增强版
 
+新增 [攻击者输入驱动的 AI 蜜罐](docs/INPUT_DRIVEN_HONEYPOT.md)：理解参数和正文，动态生成会话内模拟接口与回复。
+
 当前完整说明：[实现方案、模块与原理](docs/CURRENT_IMPLEMENTATION.md)。
 
 新增业务模块、DWS 关联数据、七步 Agent 发布工作流与本地状态恢复。启动及边界见 [业务增强说明](docs/BUSINESS_UPGRADE.md)。
