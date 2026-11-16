@@ -4,6 +4,7 @@ PyYAML>=6.0
 
 # M1：AI 网关 :4000（OpenAI 兼容入口）
 fastapi>=0.110
+pydantic>=2.9       # 研究控制面与模型决策的结构化校验
 uvicorn>=0.29
 
 # 可选：Cowrie 事件桥接的 Redis 输出（内网部署用；缺省走文件模式）

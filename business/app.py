@@ -166,7 +166,16 @@ def _biz_event(
 @app.post("/api/login")
 async def login(request: Request):
     engine = get_engine()
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"error": "登录参数格式错误"}, status_code=400)
+    if (not isinstance(body, dict)
+            or not isinstance(body.get("username", ""), str)
+            or not isinstance(body.get("password", ""), str)
+            or len(body.get("username", "")) > 256
+            or len(body.get("password", "")) > 4096):
+        return JSONResponse({"error": "登录参数格式错误"}, status_code=400)
     username = body.get("username") or ""
     password = body.get("password") or ""
     cred_hash = _sha(password)
@@ -496,3 +505,17 @@ def ui():
 from business.enterprise import register
 
 register(app)
+
+
+# Research control plane is token-protected independently of employee sessions.
+# Visitor experiments do not mutate the deterministic DWS/replay engine.
+from research.api import install_routes as _install_research_routes
+
+
+def _research_events_snapshot():
+    with _lock:
+        get_engine()  # Restore the checkpoint before taking the first snapshot.
+        return list(_events)
+
+
+_install_research_routes(app, get_engine, _research_events_snapshot)
