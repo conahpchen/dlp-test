@@ -110,6 +110,13 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @control_api.get('/runs/{run_id}/release')
+    def release_status(run_id: str):
+        try:
+            return current_lab().release_status(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown run') from exc
+
     @control_api.post('/runs/{run_id}/rollback')
     def rollback(run_id: str):
         try:

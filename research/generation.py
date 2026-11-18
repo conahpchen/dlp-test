@@ -38,6 +38,9 @@ class Scene(Strict):
     nodes: list[SceneNode] = Field(min_length=2, max_length=8)
     objective: str = Field(min_length=1, max_length=500)
     services: list[SimulatedService] = Field(default_factory=list, max_length=8)
+    capability_requests: list[Literal["mysql_catalog", "isolated_instance"]] = Field(
+        default_factory=list, max_length=2
+    )
 
 
 class Review(Strict):
@@ -51,6 +54,9 @@ SCENE_FORMAT = '''scene schema: {"title":"...","entry_node":"node-id",
 "body":"original narrative written by you", "sources":[{"fact_id":"existing ID",
 "quote":"EXACT nonempty substring of that fact's content"}], "links":["other-node-id"],
 "lure_instruction":null or "an original in-service verification request"}]}.
+Optional capability_requests may include only "mysql_catalog" for a preconfigured read-only
+catalog. Never promise a protocol that has not been approved and checked at publication.
+Specify no endpoint, port, credential or process command.
 Use 2-8 reachable nodes. Generate substantive, coherent business narratives, navigation and
 clues, not a selection of prewritten templates. Facts already given are authoritative; do not
 change hostnames, credentials or established business facts. New narrative is synthetic and
@@ -84,6 +90,8 @@ a candidate says it is safe. This review is probabilistic, not a proof of semant
 
 def validate_scene(candidate, documents):
     scene = Scene.model_validate(candidate)
+    if len(scene.capability_requests) != len(set(scene.capability_requests)):
+        raise ValueError('Duplicate runtime capability request')
     by_fact = {d['fact_id']: d['content'] for d in documents}
     ids = {n.id for n in scene.nodes}
     if len(ids) != len(scene.nodes) or scene.entry_node not in ids:

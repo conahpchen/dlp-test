@@ -36,6 +36,11 @@ class ResearchLab:
             CREATE TABLE IF NOT EXISTS visitor_runs (
                 session TEXT PRIMARY KEY, run TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS release_manifests (
+                run TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS release_preparations (
+                id INTEGER PRIMARY KEY, run TEXT NOT NULL, status TEXT NOT NULL,
+                detail TEXT, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS release_history (
                 id INTEGER PRIMARY KEY, previous_run TEXT, next_run TEXT, action TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agent_registrations (
@@ -173,19 +178,46 @@ class ResearchLab:
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
 
     def activate(self, run):
-        from research.generation import validate_scene
+        from research.service_planner import ReleasePreparationError, prepare_release
 
         with self.connect() as db:
             plan = self._plan(db, run)
             if plan.get('origin') != 'ai':
                 raise ValueError('Only model-generated scenes can be activated')
-            validate_scene(plan['scene'], plan['documents'])
             previous = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
+
+        try:
+            manifest = prepare_release(plan)
+        except ReleasePreparationError as exc:
+            with self.connect() as db:
+                db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'rejected',?)",
+                           (run, exc.code))
+            raise
+
+        with self.connect() as db:
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            latest_revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
+            if active != previous or latest_revision != revision or self._plan(db, run) != plan:
+                raise ValueError('Release changed during preparation')
+            db.execute("INSERT OR REPLACE INTO release_manifests VALUES (?,?)", (run, json.dumps(manifest)))
+            db.execute("INSERT INTO release_preparations(run,status) VALUES (?,'prepared')", (run,))
             if not previous or previous[0] != run:
                 db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
                            (previous[0] if previous else None, run, 'activate'))
                 db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
         return dict(active_run=run, entry=f'/decoy/{run}/index')
+
+    def release_status(self, run):
+        with self.connect() as db:
+            self._plan(db, run)
+            row = db.execute('SELECT payload FROM release_manifests WHERE run=?', (run,)).fetchone()
+            attempts = db.execute('SELECT status,detail,recorded_at FROM release_preparations '
+                                  'WHERE run=? ORDER BY id DESC LIMIT 20', (run,)).fetchall()
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+        return {"active": bool(active and active[0] == run), "manifest": json.loads(row[0]) if row else None,
+                "attempts": [dict(status=status, detail=detail, recorded_at=recorded)
+                             for status, detail, recorded in attempts]}
 
     def rollback(self, run):
         """Restore the predecessor of the current release in one transaction."""
@@ -228,7 +260,11 @@ class ResearchLab:
 
     def deactivate(self):
         with self.connect() as db:
-            db.execute('DELETE FROM settings WHERE key=?', ('active_run',))
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if active:
+                db.execute("INSERT INTO release_history(previous_run,next_run,action) VALUES (?,NULL,'deactivate')",
+                           (active[0],))
+                db.execute("DELETE FROM settings WHERE key='active_run'")
 
     def policy(self, run, session):
         with self.connect() as db:
@@ -419,6 +455,13 @@ class ResearchLab:
             scene = policy.get('scene') or plan.get('scene')
             service = next((s for s in (scene or {}).get('services', [])
                             if resource == 'service/' + s['path'] and s['method'] == method), None)
+            if service and not policy.get('scene'):
+                compiled = db.execute('SELECT payload FROM release_manifests WHERE run=?', (run,)).fetchone()
+                if compiled:
+                    routes = json.loads(compiled[0])['routes']
+                    if not any(route['path'] == f'{root}/{resource}' and route['method'] == method
+                               and route['node_id'] == service['node_id'] for route in routes):
+                        service = None
             if service:
                 resource = 'scene/' + service['node_id']
             if scene and (resource == 'index'  or resource.startswith('scene/')):

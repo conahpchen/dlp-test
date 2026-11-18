@@ -19,6 +19,7 @@ dd{margin:0;overflow-wrap:anywhere}
 <label>研究场景 <select id="runs"></select></label>
 <button id="refresh" type="button">刷新证据</button>
 <p id="status" role="status"></p>
+<h2>服务发布</h2><div id="release"></div>
 <h2>Agent 登记</h2><div id="registrations"></div>
 <h2>Canary 命中</h2><div id="canaries"></div>
 <h2>Web 事件时间线</h2>
@@ -33,6 +34,7 @@ const statusLine = document.querySelector('#status');
 const registrations = document.querySelector('#registrations');
 const canaries = document.querySelector('#canaries');
 const timeline = document.querySelector('#timeline');
+const releasePanel = document.querySelector('#release');
 const fieldNames = {
   framework:'框架', model_family:'模型系列', instance_kind:'运行类型', task:'任务类别',
   registration_id:'登记编号', session:'观察会话', received_at:'接收时间', world_version:'世界版本',
@@ -62,16 +64,58 @@ function group(title, fields) {
   section.append(list);
   return section;
 }
+function renderRelease(run, release) {
+  const card = document.createElement('article');
+  const state = document.createElement('p');
+  state.textContent = release.active ? '当前发布' : '未激活';
+  card.append(state);
+  if (release.manifest) {
+    for (const capability of release.manifest.capabilities) {
+      const line = document.createElement('p');
+      line.textContent = 'L' + capability.level + ' · ' + capability.protocol + ' · ' + capability.exposure;
+      card.append(line);
+    }
+  }
+  for (const attempt of release.attempts) {
+    const line = document.createElement('p');
+    line.textContent = attempt.recorded_at + ' · ' + attempt.status + (attempt.detail ? ' · ' + attempt.detail : '');
+    card.append(line);
+  }
+  if (runs.selectedOptions[0]?.dataset.origin === 'ai') {
+    const button = document.createElement('button');
+    const action = release.active ? 'rollback' : 'activate';
+    button.textContent = release.active ? '回滚当前场景' : '审批并激活场景';
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const response = await fetch('/api/evidence/runs/' + encodeURIComponent(run) + '/release/' + action, {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
+        });
+        const result = await response.json();
+        await refresh();
+        if (!response.ok) statusLine.textContent = result.detail;
+      } catch (error) {
+        statusLine.textContent = '无法更新发布状态';
+      } finally {
+        button.disabled = false;
+      }
+    };
+    card.append(button);
+  }
+  releasePanel.replaceChildren(card);
+}
 async function refresh() {
   try {
     const selected = runs.value;
     registrations.replaceChildren();
     canaries.replaceChildren();
     timeline.replaceChildren();
+    releasePanel.replaceChildren();
     if (!selected) return;
     const evidence = await get('/api/evidence/runs/' + encodeURIComponent(selected));
     if (runs.value !== selected) return;
     statusLine.textContent = '';
+    renderRelease(selected, evidence.release);
     if (!evidence.registrations.length) registrations.textContent = '暂无登记';
     if (!evidence.canary_uses.length) canaries.textContent = '暂无跨入口命中';
     for (const row of evidence.registrations) {
@@ -112,7 +156,11 @@ async function refresh() {
 async function start() {
   try {
     const rows = await get('/api/evidence/runs');
-    for (const row of rows) runs.add(new Option(row.run_id + ' · DWS ' + row.world_version,row.run_id));
+    for (const row of rows) {
+      const option = new Option(row.run_id + ' · DWS ' + row.world_version,row.run_id);
+      option.dataset.origin = row.origin;
+      runs.add(option);
+    }
     if (!rows.length) statusLine.textContent = '暂无研究场景';
     await refresh();
   } catch (error) {

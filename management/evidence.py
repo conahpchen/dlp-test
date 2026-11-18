@@ -2,10 +2,12 @@
 
 import json
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
+from management.publications import json_only
 from research.api import current_lab
 from research.registration import evidence
 
@@ -34,8 +36,20 @@ def evidence_router(require_operator):
             return {
                 **evidence(lab, run_id),
                 "canary_uses": lab.canary_uses(run_id),
+                "release": lab.release_status(run_id),
             }
         except KeyError as exc:
             raise HTTPException(404, "Unknown run") from exc
+
+    @router.post("/api/evidence/runs/{run_id}/release/{action}")
+    def change_release(run_id: str, action: Literal["activate", "rollback"], request: Request):
+        json_only(request)
+        lab = current_lab()
+        try:
+            return (lab.activate if action == "activate" else lab.rollback)(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, "Unknown run") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     return router
