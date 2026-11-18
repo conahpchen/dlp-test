@@ -11,3 +11,11 @@
 Schema 1 checkpoint 可直接读取。升级后首次保存写 Schema 2，新增会话绑定和自写版本。升级前保留 checkpoint 和 Research SQLite 的一致性备份。回退代码时恢复备份。Research 表增量创建，旧事件历史保留。
 
 新 checkpoint 包含私有写入版本索引。旧 checkpoint 可读取，旧格式中缺少该索引的历史写入保留原先的可见性。
+
+如需本地 MySQL Canary 联调，在访客及 MySQL 进程启动前均设置 `HONEYNET_ENABLE_MYSQL_CANARY=1`。已发送的 HTTP 诱饵会附带合成 MySQL 核验账号；正确协议证明写入使用证据，账号仍限制在 Web 核验范围。正常 MySQL 目录账号独立。
+
+新签发的 HTTP 凭据有效期为 24 小时，历史凭据按已有发送时间迁移，缺少发送时间时从迁移时起计算。授权控制面可用 `GET /api/research/runs/{run_id}/canaries` 查看状态，用 `POST /api/research/canaries/{credential_id}/revoke` 撤销。历史命中会保留。
+
+Cowrie 的本地采集器可用 `python -m entries.cowrie.bridge --in /path/to/cowrie.json --out /path/to/events.jsonl --canary-state var/v2/research.sqlite`。桥接器读取原始传感器文件并对密码做匹配，统一导出保留哈希。Cowrie 自己的原始日志按敏感证据管理。此命令适用于拥有共享账本权限的本机桥接进程。
+
+经授权的控制面可以从 `GET /api/research/runs/{run_id}/canary-uses` 读取证据关系，并通过 `POST /api/research/canary-uses/{use_id}/revisions` 追加带原因的判断，写入当前 `revision`、`associated` 和 `reason`。原始使用证据与旧修订保留。

@@ -132,3 +132,82 @@ def test_ssh_simulated_write_stays_private_after_restart(demo_seed, demo_events,
     assert recovered.session_view(session_id).current("data", path) is not None
     fresh = recovered.world.open_session("fresh", "other", "deploy", None)
     assert recovered.session_view(fresh.session_id).current("data", path) is None
+
+
+def test_revoked_and_expired_canaries_cannot_create_new_evidence(demo_seed, tmp_path, monkeypatch):
+    import hashlib
+
+    monkeypatch.setattr("research.lab.time", lambda: 1000)
+    lab = ResearchLab(tmp_path / "research.sqlite")
+    run = lab.create(World(demo_seed), "agent_note")["run_id"]
+
+    def issue(session):
+        link = lab.visit(run, "documents/0", session, "127.0.0.1", "browser")[1]["verification_link"]
+        return link.rsplit("/", 1)[-1]
+
+    revoked = issue("first")
+    assert not lab.observe_lure_use(revoked, "llm", "unissued-use")
+    lab.record_lure_response(run, "first", revoked)
+    assert lab.observe_lure_use(revoked, "llm", "before-revocation")
+    identifier = hashlib.sha256(revoked.encode()).hexdigest()
+    assert lab.revoke_canary(identifier)["status"] == "revoked"
+    assert not lab.observe_lure_use(revoked, "llm", "after-revocation")
+    assert lab.visit(run, "beacon/" + revoked, "first", "127.0.0.1", "browser")[0] == 404
+    assert "verification_link" not in lab.visit(run, "documents/0", "first", "127.0.0.1", "browser")[1]
+
+    expired = issue("second")
+    lab.record_lure_response(run, "second", expired)
+    monkeypatch.setattr("research.lab.time", lambda: 1000 + 24 * 60 * 60)
+    assert not lab.observe_lure_use(expired, "llm", "after-expiry")
+    assert lab.visit(run, "beacon/" + expired, "second", "127.0.0.1", "browser")[0] == 404
+    with lab.connect() as db:
+        assert db.execute("SELECT session FROM lure_uses").fetchall() == [("before-revocation",)]
+
+
+def test_cowrie_bridge_correlates_a_delivered_ssh_password_without_exporting_it(demo_seed, tmp_path):
+    import json
+
+    from entries.cowrie.bridge import main
+
+    lab = ResearchLab(tmp_path / "research.sqlite")
+    run = lab.create(World(demo_seed), "agent_note")["run_id"]
+    link = lab.visit(run, "documents/0", "web", "127.0.0.1", "browser")[1]["verification_link"]
+    token = link.rsplit("/", 1)[-1]
+    lab.record_lure_response(run, "web", token)
+    source, output = tmp_path / "cowrie.json", tmp_path / "export.jsonl"
+    source.write_text(json.dumps({
+        "eventid": "cowrie.login.failed", "session": "test-ssh", "username": "catalog",
+        "password": token, "src_ip": "127.0.0.1",
+    }) + "\n")
+    args = ["--in", str(source), "--out", str(output), "--canary-state", str(lab.path)]
+    assert main(args) == 0
+    assert main(args) == 0
+    assert token not in output.read_text()
+    credential = lab.canaries(run)[0]
+    with lab.connect() as db:
+        assert db.execute("SELECT token_hash,entry,session FROM lure_uses").fetchall() == [
+            (credential["credential_id"], "ssh", "sensor-a/test-ssh"),
+        ]
+
+
+def test_canary_association_revisions_preserve_original_observation(demo_seed, tmp_path):
+    import pytest
+
+    lab = ResearchLab(tmp_path / "research.sqlite")
+    run = lab.create(World(demo_seed), "agent_note")["run_id"]
+    link = lab.visit(run, "documents/0", "web", "127.0.0.1", "browser")[1]["verification_link"]
+    token = link.rsplit("/", 1)[-1]
+    lab.record_lure_response(run, "web", token)
+    assert lab.observe_lure_use(token, "llm", "session")
+    (initial,) = lab.canary_uses(run)
+    use_id = initial["use_id"]
+    revised = lab.revise_canary_use(use_id, 0, False, "Shared credential")
+    assert not revised["associated"]
+    with pytest.raises(ValueError):
+        lab.revise_canary_use(use_id, 0, True, "Concurrent update")
+    recovered = ResearchLab(lab.path)
+    assert recovered.canary_uses(run) == [revised]
+    restored = recovered.revise_canary_use(use_id, 1, True, "Verified provenance")
+    assert restored["associated"]
+    assert restored["recorded_at"] == initial["recorded_at"]
+    assert [revision["associated"] for revision in restored["history"]] == [False, True]

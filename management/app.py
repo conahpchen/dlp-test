@@ -36,7 +36,7 @@ app.include_router(template_router(require_operator))
 def research_metrics():
     path = os.environ.get("RESEARCH_STATE_FILE")
     if not path or not Path(path).is_file():
-        return {"issued": None, "http_response_sent": None, "fake_api_matches": None}
+        return {"issued": None, "http_response_sent": None, "fake_api_matches": None, "mysql_matches": None, "ssh_matches": None}
     uri = Path(path).resolve().as_uri() + "?mode=ro"
     with closing(sqlite3.connect(uri, uri=True)) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -46,6 +46,10 @@ def research_metrics():
             "http_response_sent": db.execute("SELECT COUNT(*) FROM lure_response_receipts").fetchone()[0]
             if "lure_response_receipts" in tables else None,
             "fake_api_matches": db.execute("SELECT COUNT(*) FROM lure_uses WHERE entry='llm'").fetchone()[0]
+            if "lure_uses" in tables else None,
+            "mysql_matches": db.execute("SELECT COUNT(*) FROM lure_uses WHERE entry='mysql'").fetchone()[0]
+            if "lure_uses" in tables else None,
+            "ssh_matches": db.execute("SELECT COUNT(*) FROM lure_uses WHERE entry='ssh'").fetchone()[0]
             if "lure_uses" in tables else None,
         }
 
@@ -87,6 +91,8 @@ def dashboard():
             ("Canary 签发", data["canary"]["issued"]),
             ("含 Canary 的 HTTP 响应", data["canary"]["http_response_sent"]),
             ("假 AI API 凭据命中", data["canary"]["fake_api_matches"]),
+            ("MySQL 核验命中", data["canary"]["mysql_matches"]),
+            ("SSH 传感器命中", data["canary"]["ssh_matches"]),
         )
     )
     services = "".join(

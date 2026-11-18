@@ -29,3 +29,11 @@
 - 管理端新增场景模板配置，可新增模板或追加修订。回环测试经管理端保存模板，从独立控制面按修订创建场景，并从访客监听器访问该场景。测试也覆盖未授权访问和修订冲突。
 - 更新后 `.venv/bin/python -m pytest -q` 为 372 通过，1 条既有弃用警告。确定性回放校验通过。
 - 整体验收仍未通过。场景模板用于 Web 研究 run；通用合成数据编辑、DWS 发布审批和跨协议应用仍待实现。
+
+
+### Canary 四入口验证
+
+- `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 377 项通过，含 Cowrie 3.1.7 容器与真实 OpenSSH、PyMySQL 客户端联调。
+- 单枚已发送 HTTP Canary 可在 Web 核验，并与假 AI Bearer、MySQL 密码认证证明和 Cowrie 登录日志归集为同一凭据的使用证据。证明记录未合并现实身份，也未为 Web 作用域凭据授予 MySQL 或假 AI 权限。Cowrie 桥接导出文件未包含明文凭据。
+- 实测错误 MySQL 密码、到期和撤销拒绝新增验证匹配。证据关联可以独立撤销和恢复，原始观测、时间及修订历史在重启后可查询。
+- Cowrie 终端的 DWS 投影、统一跨协议版本绑定、通用发布控制面和生产网络隔离仍有缺项。

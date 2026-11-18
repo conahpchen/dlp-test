@@ -1,4 +1,5 @@
 """Control-plane tools for builder/analyst agents and a separate visitor surface."""
+import hashlib
 import os
 import re
 import secrets
@@ -6,12 +7,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path as ApiPath, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
-from research.lab import ResearchLab
+from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX, ResearchLab
 
 
 @lru_cache(maxsize=4)
@@ -33,6 +34,13 @@ def control(request: Request):
 class AdaptSpec(BaseModel):
     model_config = ConfigDict(extra='forbid')
     session: str
+
+
+class AssociationRevision(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    revision: int = Field(ge=0)
+    associated: bool
+    reason: str = Field(min_length=1, max_length=240)
 
 
 class RunSpec(BaseModel):
@@ -118,6 +126,36 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         except KeyError as exc:
             raise HTTPException(404, 'Unknown run') from exc
 
+    @control_api.get('/runs/{run_id}/canaries')
+    def list_canaries(run_id: str):
+        try:
+            return current_lab().canaries(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown run') from exc
+
+    @control_api.post('/canaries/{credential_id}/revoke')
+    def revoke_canary(credential_id: str = ApiPath(pattern=r'^[0-9a-f]{64}$')):
+        try:
+            return current_lab().revoke_canary(credential_id)
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown canary') from exc
+
+    @control_api.get('/runs/{run_id}/canary-uses')
+    def canary_uses(run_id: str):
+        try:
+            return current_lab().canary_uses(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown run') from exc
+
+    @control_api.post('/canary-uses/{use_id}/revisions')
+    def revise_canary_use(use_id: int, edit: AssociationRevision):
+        try:
+            return current_lab().revise_canary_use(use_id, **edit.model_dump())
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown canary evidence') from exc
+        except ValueError as exc:
+            raise HTTPException(409, 'Evidence association changed') from exc
+
     @control_api.post('/runs/{run_id}/adapt')
     def adapt_run(run_id: str, spec: AdaptSpec):
         from research.controller import adapt
@@ -186,7 +224,7 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                 else:
                     status, body = await run_in_threadpool(lab.visit, run_id, 'scene/' + policy_now['response_node'], session, peer, agent)
             else:
-                status, body = await run_in_threadpool(lab.visit, run_id, resource, session, peer, agent, request.method)
+                status, body = await run_in_threadpool(lab.visit, run_id, resource, session, peer, agent, request.method, require_receipt=True)
             if enabled and not is_input:
                 from research.controller import adapt
                 from research.model import Model
@@ -210,7 +248,11 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         lure_link = body.get('verification_link')
         receipt = None
         if status == 200 and lure_link:
-            receipt = BackgroundTask(lab.record_lure_response, run_id, session, lure_link.rsplit('/', 1)[-1])
+            token = lure_link.rsplit('/', 1)[-1]
+            receipt = BackgroundTask(lab.record_lure_response, run_id, session, token)
+            if os.environ.get('HONEYNET_ENABLE_MYSQL_CANARY') == '1':
+                short_id = hashlib.sha256(token.encode()).hexdigest()[:MYSQL_CANARY_ID_LENGTH]
+                body['mysql_verification'] = {'username': MYSQL_CANARY_PREFIX + short_id, 'password': token}
         response = JSONResponse(body, status_code=status, background=receipt,
                                 headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
         if lead:

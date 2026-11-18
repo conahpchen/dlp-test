@@ -4,28 +4,71 @@ import asyncio
 import json
 import os
 import re
+from contextlib import aclosing
+from dataclasses import dataclass
 from pathlib import Path
 
 from mysql_mimic import MysqlServer, Session
-from mysql_mimic.auth import IdentityProvider, NativePasswordAuthPlugin, User
+from mysql_mimic.auth import Forbidden, IdentityProvider, NativePasswordAuthPlugin, Success, User
 from mysql_mimic.errors import MysqlError
 
 from business.storage import location
-from dws.ids import entity_uuid
+from dws.ids import entity_uuid, ulid_now
+from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX
 
 HOST = "db01"
 QUERY = "select name, engine from collab_core.catalog"
 
 
+@dataclass
+class CanaryUser(User):
+    credential_id: str = ""
+
+
+class CanaryNativePassword(NativePasswordAuthPlugin):
+    """Record successful canary proof without granting a database session."""
+
+    def __init__(self, lab):
+        self.lab = lab
+
+    async def auth(self, auth_info=None):
+        async with aclosing(super().auth(auth_info)) as exchange:
+            result = await anext(exchange)
+            if isinstance(result, bytes):
+                auth_info = yield result
+                result = await exchange.asend(auth_info)
+            if isinstance(result, Success) and isinstance(auth_info.user, CanaryUser):
+                await asyncio.to_thread(self.lab.observe_canary_proof, auth_info.user.credential_id,
+                                        "mysql", ulid_now())
+                yield Forbidden()
+            else:
+                yield result
+
+
 class CatalogCredentials(IdentityProvider):
-    def __init__(self, password):
+    def __init__(self, password, lab=None):
         if not password:
             raise ValueError("HONEYNET_MYSQL_PASSWORD is required")
         self.auth_string = NativePasswordAuthPlugin.create_auth_string(password)
+        self.lab = lab
+
+    def get_plugins(self):
+        if self.lab is None:
+            return super().get_plugins()
+        return [CanaryNativePassword(self.lab)]
 
     async def get_user(self, username):
         if username == "catalog_reader":
             return User(username, self.auth_string, NativePasswordAuthPlugin.name)
+        short_id = username.removeprefix(MYSQL_CANARY_PREFIX)
+        if self.lab and username.startswith(MYSQL_CANARY_PREFIX) and re.fullmatch(
+            rf"[0-9a-f]{{{MYSQL_CANARY_ID_LENGTH}}}", short_id
+        ):
+            credential = await asyncio.to_thread(self.lab.mysql_canary, short_id)
+            if credential:
+                credential_id, token = credential
+                return CanaryUser(username, NativePasswordAuthPlugin.create_auth_string(token),
+                                  NativePasswordAuthPlugin.name, credential_id=credential_id)
         return None
 
 
@@ -59,21 +102,26 @@ class CatalogSession(Session):
         raise MysqlError("Statement is outside the supported catalog subset")
 
 
-def create_server(checkpoint, password):
+def create_server(checkpoint, password, lab=None):
     checkpoint = Path(checkpoint)
     CatalogSession(checkpoint)
     async def session_factory():
         return await asyncio.to_thread(CatalogSession, checkpoint)
 
     return MysqlServer(session_factory=session_factory,
-                       identity_provider=CatalogCredentials(password))
+                       identity_provider=CatalogCredentials(password, lab))
 
 
 async def main():
     checkpoint = location()
     if checkpoint is None or not checkpoint.is_file():
         raise SystemExit("Start the business service and initialize a DWS checkpoint first")
-    server = create_server(checkpoint, os.environ.get("HONEYNET_MYSQL_PASSWORD", ""))
+    lab = None
+    if os.environ.get("HONEYNET_ENABLE_MYSQL_CANARY") == "1":
+        from research.api import current_lab
+
+        lab = current_lab()
+    server = create_server(checkpoint, os.environ.get("HONEYNET_MYSQL_PASSWORD", ""), lab)
     await server.start_server(host="127.0.0.1", port=int(os.environ.get("HONEYNET_MYSQL_PORT", "3307")))
     await server.serve_forever()
 
