@@ -14,11 +14,21 @@ export RESEARCH_STATE_FILE="$state_dir/research.sqlite"
 export HONEYNET_LATENCY_FILE="$state_dir/http.sqlite"
 python_bin=${PYTHON_BIN:-.venv/bin/python}
 
+run_public() {
+  if [ "${HONEYNET_INGRESS_ONLY:-0}" = 1 ]; then
+    exec "$python_bin" -m deploy.harden.network "$@"
+  fi
+  exec "$python_bin" -m "$@"
+}
+
 case "${1:-}" in
   visitor)
     unset RESEARCH_MODEL_API_KEY RESEARCH_MODEL_BASE_URL RESEARCH_MODEL HONEYNET_DASHBOARD_PASSWORD HONEYNET_MYSQL_PASSWORD
     export HONEYNET_VISITOR_ONLY=1
-    exec "$python_bin" -m uvicorn business.app:app --no-access-log --host 127.0.0.1 --port "${HONEYNET_VISITOR_PORT:-8080}"
+    if [ "${HONEYNET_INGRESS_ONLY:-0}" = 1 ]; then
+      unset HONEYNET_PG_DSN HONEYNET_CONTROL_TOKEN
+    fi
+    run_public uvicorn business.app:app --no-access-log --host 127.0.0.1 --port "${HONEYNET_VISITOR_PORT:-8080}"
     ;;
   control)
     unset HONEYNET_DASHBOARD_PASSWORD HONEYNET_MYSQL_PASSWORD
@@ -32,7 +42,7 @@ case "${1:-}" in
     ;;
   mysql)
     unset RESEARCH_MODEL_API_KEY RESEARCH_MODEL_BASE_URL RESEARCH_MODEL HONEYNET_CONTROL_TOKEN HONEYNET_DASHBOARD_PASSWORD
-    exec "$python_bin" -m entries.mysql.app
+    run_public entries.mysql.app
     ;;
   cowrie)
     projection=${HONEYNET_COWRIE_EXPORT:?set the path to an exported world.json}

@@ -9,13 +9,14 @@ import httpx
 
 
 @contextmanager
-def listener(app, env):
+def listener(app, env, *, ingress_only=False):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         sock.listen()
         port = sock.getsockname()[1]
+        module = ["deploy.harden.network", "uvicorn"] if ingress_only else ["uvicorn"]
         process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", app, "--fd", str(sock.fileno()), "--log-level", "warning"],
+            [sys.executable, "-m", *module, app, "--fd", str(sock.fileno()), "--log-level", "warning"],
             env=env, pass_fds=(sock.fileno(),),
         )
     try:

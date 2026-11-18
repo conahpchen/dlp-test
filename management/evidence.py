@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from management.publications import json_only
 from research.api import current_lab
+from research.bindings import issue
 from research.registration import evidence
 
 
@@ -47,6 +48,16 @@ def evidence_router(require_operator):
         lab = current_lab()
         try:
             return (lab.activate if action == "activate" else lab.rollback)(run_id)
+        except KeyError as exc:
+            raise HTTPException(404, "Unknown run") from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @router.post("/api/evidence/runs/{run_id}/bindings", status_code=201)
+    def issue_binding(run_id: str, request: Request):
+        json_only(request)
+        try:
+            return issue(current_lab(), run_id)
         except KeyError as exc:
             raise HTTPException(404, "Unknown run") from exc
         except ValueError as exc:

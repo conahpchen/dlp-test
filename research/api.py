@@ -124,6 +124,10 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         except (KeyError, ValueError) as exc:
             raise HTTPException(409, 'Release cannot be rolled back') from exc
 
+    @control_api.post('/active/reconcile')
+    def reconcile():
+        return current_lab().compensate_unready()
+
     @control_api.delete('/active')
     def deactivate():
         current_lab().deactivate()

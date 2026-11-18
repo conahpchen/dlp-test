@@ -60,3 +60,10 @@ deploy/run-v2-local.sh cowrie
 
 
 在「会话证据」选择模型生成的场景可审批激活或回滚。发布前编译现有 HTTP 监听器的有限路由。场景如声明 `mysql_catalog`，执行激活的控制面或 Dashboard 进程需配置 `HONEYNET_MYSQL_HEALTH_PASSWORD`，其值为本地合成目录密码，并与 MySQL 监听器使用同一个 `HONEYNET_MYSQL_PORT`。健康检查的地址固定为 loopback，认证后必须读到目录。缺失、认证失败或未批准的独立运行时会拒绝激活，已发布场景继续响应。目录密码只交给执行授权验证的进程。
+
+
+### 版本绑定、依赖补偿和入口隔离
+
+- 操作员可通过 `POST /api/evidence/runs/{run_id}/bindings` 为已有发布签发一小时的版本选择票据。Web 根入口和集成假 AI API 接收 `X-Honeynet-Binding`，MySQL 使用返回的合成用户名和既有目录密码。票据不替代协议身份验证。已建立会话维持原来的版本。Cowrie 尚未接入这种显式票据。
+- 控制面 `POST /api/research/active/reconcile` 复查当前发布声明的本地 MySQL 依赖。不可用时恢复不依赖 MySQL 的前一发布，若不存在则停止向新访客投放；已有访客保持其原场景。
+- Linux 机器安装 `libseccomp.so.2` 后，可为 visitor 和 mysql 启动设置 `HONEYNET_INGRESS_ONLY=1`。这两个进程的出站连接和数据报操作被系统调用阻断，正常回环入口仍可接入。visitor 使用本地 DWS 而非直连 Postgres。Cowrie 镜像、身份与文件权限隔离，以及外部部署编排需要单独验证。

@@ -20,12 +20,12 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from dws.ids import ulid_now
 from dws.world import CommitRejected, World
-from entries.gateway.session import bind_model_list, credentials
+from entries.gateway.session import bind_explicit, bind_model_list, credentials
 from generation.llm_templates import classify_message
 from judgment import L1RulesJudge
 from replay.engine import Engine
@@ -398,11 +398,21 @@ def events_view(request: Request):
 # ------------------------------------------------------------------ 集成 AI 网关（共享 Engine，世界强一致）
 
 
+def _explicit_fake_binding(engine, request, session, key_hash):
+    try:
+        return bind_explicit(engine, request, session, key_hash)
+    except KeyError:
+        raise HTTPException(404, "Unknown version binding") from None
+    except PermissionError:
+        raise HTTPException(401, "Invalid API key") from None
+
+
 @app.get("/v1/models")
 def v1_models(request: Request):
     engine = get_engine()
     key_hash, session = credentials(request)
     with _lock:
+        session = _explicit_fake_binding(engine, request, session, key_hash)
         models = bind_model_list(engine, session, key_hash)
         if session in engine.world.sessions:
             _checkpoint(engine)
@@ -433,6 +443,8 @@ async def v1_chat(request: Request):
             400,
         )
     cred_hash, session = credentials(request)
+    with _lock:
+        session = _explicit_fake_binding(engine, request, session, cred_hash)
     authorization = request.headers.get("authorization", "")
     bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
     if re.fullmatch(r"[A-Za-z0-9_-]{32}", bearer):

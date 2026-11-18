@@ -113,17 +113,21 @@ class World:
     # ------------------------------------------------------------- 会话
 
     def open_session(self, session_id: str, attacker_id: str, user: Optional[str],
-                     host_entity_id: Optional[str]) -> Session:
+                     host_entity_id: Optional[str], *, pinned_version: int | None = None) -> Session:
         """会话开始：钉定当前世界版本（契约 §5.1）。已存在的会话重复登录则刷新用户。"""
+        if pinned_version is not None and not SEED_VERSION <= pinned_version <= self.meta["world_version"]:
+            raise ValueError("DWS session version is unavailable")
         sess = self.sessions.get(session_id)
         if sess is None:
             sess = Session(
                 session_id=session_id, attacker_id=attacker_id, user=user,
-                pinned_version=self.meta["world_version"],
+                pinned_version=pinned_version if pinned_version is not None else self.meta["world_version"],
                 started_hlc=self.meta["now_hlc"],
                 host_entity_id=host_entity_id)
             self.sessions[session_id] = sess
         else:
+            if pinned_version is not None and sess.pinned_version != pinned_version:
+                raise ValueError("DWS session version is already bound")
             sess.user = user
         return sess
 

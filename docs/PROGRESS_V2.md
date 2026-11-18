@@ -85,3 +85,11 @@
 - `pytest tests/test_service_planner.py` 验证实际 MySQL 客户端失败与成功、失败时保留活跃场景、旧会话绑定、回滚、管理端鉴权和清单控制真实 HTTP 路由。
 - MySQL 准备检查覆盖预配置的本机运行时。跨服务通用发布、L3 服务生命周期和生产网络隔离仍需整体验收。
 - 启用真实 Cowrie/OpenSSH 与 PyMySQL 的全量测试 388 项通过，1 条既有依赖弃用警告。确定性回放和发布页面脚本语法检查通过。
+
+
+### 三协议版本绑定、依赖补偿和 Linux 入口隔离
+
+- 操作员签发受时效控制的显式版本选择票据。测试使用同一票据在 Web、集成假 AI API 和真实 MySQL 选择旧的 DWS 版本，新请求读取新版本。假 AI 和 MySQL 仍要求各自的合成凭据。SSH 暂未接入这套票据。
+- 真实 MySQL 服务停止后，控制面复查将新访客切回不依赖该服务的先前场景，已绑定访客保留原版本。当前补偿覆盖场景中的预配置 MySQL 依赖。
+- Linux 入站模式为 HTTP 和 MySQL 启动器提供系统调用限制。实测真实 HTTP 仍响应，进程发起到活跃本机 TCP/UNIX 端点的连接以及 UDP/外发数据报均得到 EPERM。Cowrie、文件权限及完整生产拓扑未验收。
+- `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 392 项通过。Linux 受限进程的真实 PyMySQL 入站握手和查询验证通过。确定性回放以及启动脚本语法检查通过。

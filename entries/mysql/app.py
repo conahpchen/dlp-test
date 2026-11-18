@@ -14,6 +14,7 @@ from mysql_mimic.errors import MysqlError
 from business.atomic_state import read
 from business.storage import location
 from dws.ids import entity_uuid, ulid_now
+from research.bindings import MYSQL_PREFIX, resolve
 from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX
 
 HOST = "db01"
@@ -46,11 +47,12 @@ class CanaryNativePassword(NativePasswordAuthPlugin):
 
 
 class CatalogCredentials(IdentityProvider):
-    def __init__(self, password, lab=None):
+    def __init__(self, password, lab=None, bindings=None):
         if not password:
             raise ValueError("HONEYNET_MYSQL_PASSWORD is required")
         self.auth_string = NativePasswordAuthPlugin.create_auth_string(password)
         self.lab = lab
+        self.bindings = bindings
 
     def get_plugins(self):
         if self.lab is None:
@@ -59,6 +61,12 @@ class CatalogCredentials(IdentityProvider):
 
     async def get_user(self, username):
         if username == "catalog_reader":
+            return User(username, self.auth_string, NativePasswordAuthPlugin.name)
+        if self.bindings and username.startswith(MYSQL_PREFIX):
+            try:
+                await asyncio.to_thread(resolve, self.bindings, username.removeprefix(MYSQL_PREFIX))
+            except KeyError:
+                return None
             return User(username, self.auth_string, NativePasswordAuthPlugin.name)
         short_id = username.removeprefix(MYSQL_CANARY_PREFIX)
         if self.lab and username.startswith(MYSQL_CANARY_PREFIX) and re.fullmatch(
@@ -73,21 +81,44 @@ class CatalogCredentials(IdentityProvider):
 
 
 class CatalogSession(Session):
-    def __init__(self, checkpoint):
+    def __init__(self, checkpoint, bindings=None):
         super().__init__()
-        state = read(checkpoint)
-        self.world_version = state["meta"]["world_version"]
+        self.checkpoint = checkpoint
+        self.bindings = bindings
+        self.load()
+
+    def load(self, binding=None):
+        state = read(self.checkpoint)
+        version = state["meta"]["world_version"]
+        self.world_version = binding["world_version"] if binding else version
+        if binding and (self.world_version > version or binding["world_id"] != state["meta"]["world_id"]):
+            raise MysqlError("Catalog version unavailable")
+        private = set(state.get("private_versions", ()))
+
+        def visible(rows):
+            return next((row for row in reversed(rows or ())
+                         if row["world_version"] <= self.world_version and row["world_version"] not in private), None)
+
         facts = state["facts"]
-        host = facts["host"].get(entity_uuid("host", HOST))
-        if not host or not any(service.get("proto") == "mysql" for service in host[-1]["payload"]["services"]):
+        host = visible(facts["host"].get(entity_uuid("host", HOST)))
+        if not host or not any(service.get("proto") == "mysql" for service in host["payload"]["services"]):
             raise ValueError("MySQL service is absent from the DWS")
         self.rows = []
         for versions in facts["object"].values():
-            payload = versions[-1]["payload"]
+            fact = visible(versions)
+            if fact is None:
+                continue
+            payload = fact["payload"]
             data = payload["data"]
             if payload["type"] == "database" and data.get("host") == HOST:
                 self.rows.append((data["name"], data["engine"]))
         self.rows.sort()
+
+    async def init(self, connection):
+        await super().init(connection)
+        if self.bindings and self.username != "catalog_reader" and self.username.startswith(MYSQL_PREFIX):
+            binding = await asyncio.to_thread(resolve, self.bindings, self.username.removeprefix(MYSQL_PREFIX))
+            await asyncio.to_thread(self.load, binding)
 
     async def handle_query(self, sql, attrs):
         if len(sql) > 512:
@@ -102,26 +133,25 @@ class CatalogSession(Session):
         raise MysqlError("Statement is outside the supported catalog subset")
 
 
-def create_server(checkpoint, password, lab=None):
+def create_server(checkpoint, password, lab=None, *, bindings=None):
     checkpoint = Path(checkpoint)
     CatalogSession(checkpoint)
     async def session_factory():
-        return await asyncio.to_thread(CatalogSession, checkpoint)
+        return await asyncio.to_thread(CatalogSession, checkpoint, bindings)
 
     return MysqlServer(session_factory=session_factory,
-                       identity_provider=CatalogCredentials(password, lab))
+                       identity_provider=CatalogCredentials(password, lab, bindings))
 
 
 async def main():
     checkpoint = location()
     if checkpoint is None or not checkpoint.is_file():
         raise SystemExit("Start the business service and initialize a DWS checkpoint first")
-    lab = None
-    if os.environ.get("HONEYNET_ENABLE_MYSQL_CANARY") == "1":
-        from research.api import current_lab
+    from research.api import current_lab
 
-        lab = current_lab()
-    server = create_server(checkpoint, os.environ.get("HONEYNET_MYSQL_PASSWORD", ""), lab)
+    lab = current_lab()
+    canaries = lab if os.environ.get("HONEYNET_ENABLE_MYSQL_CANARY") == "1" else None
+    server = create_server(checkpoint, os.environ.get("HONEYNET_MYSQL_PASSWORD", ""), canaries, bindings=lab)
     await server.start_server(host="127.0.0.1", port=int(os.environ.get("HONEYNET_MYSQL_PORT", "3307")))
     await server.serve_forever()
 

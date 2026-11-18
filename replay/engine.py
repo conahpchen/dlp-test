@@ -234,11 +234,11 @@ class Engine:
         """API key 有效性预检（网关判定 ctx 用；引擎内鉴权仍以 _llm_chat 为准）。"""
         return self._match_llm_credential(cred_hash, session_id) is not None
 
-    def _match_llm_credential(self, cred_hash: str | None, session_id=None):
+    def _match_llm_credential(self, cred_hash: str | None, session_id=None, *, view=None):
         """有效 = 凭据未吊销且 valid_on 声明了 openai 服务（entry llm）。"""
         if not cred_hash:
             return None
-        for c in self.session_view(session_id).all_current_cls("credential"):
+        for c in (view or self.session_view(session_id)).all_current_cls("credential"):
             p = c.payload
             if p["secret_hash"] != cred_hash or p["revoked_at_hlc"] is not None:
                 continue

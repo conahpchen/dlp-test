@@ -33,6 +33,9 @@ class ResearchLab:
             INSERT OR IGNORE INTO template_revisions VALUES
                 ('operations', 1, '运维知识库', 'plain', '生成有业务关联的知识库与运维排查线索');
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, plan TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS version_bindings (
+                id TEXT PRIMARY KEY, run TEXT NOT NULL, world_id TEXT NOT NULL,
+                world_version INTEGER NOT NULL, expires_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS visitor_runs (
                 session TEXT PRIMARY KEY, run TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -219,6 +222,47 @@ class ResearchLab:
                 "attempts": [dict(status=status, detail=detail, recorded_at=recorded)
                              for status, detail, recorded in attempts]}
 
+    def compensate_unready(self):
+        """Stop advertising an unhealthy dependency while retaining pinned runs."""
+        from research.service_planner import mysql_catalog_ready
+
+        def uses_mysql(db, run):
+            row = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
+            return bool(row and any(item["name"] == "mysql_catalog"
+                                    for item in json.loads(row[0])["capabilities"]))
+
+        with self.connect() as db:
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if not active or not uses_mysql(db, active[0]):
+                return {"status": "not_applicable"}
+            run = active[0]
+            release = db.execute("SELECT id,previous_run FROM release_history "
+                                 "WHERE next_run=? AND action='activate' ORDER BY id DESC LIMIT 1",
+                                 (run,)).fetchone()
+            revision = db.execute("SELECT MAX(id) FROM release_history").fetchone()[0]
+        if mysql_catalog_ready():
+            return {"status": "healthy", "active_run": run}
+
+        with self.connect() as db:
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if not active or active[0] != run or db.execute(
+                "SELECT MAX(id) FROM release_history"
+            ).fetchone()[0] != revision:
+                return {"status": "stale"}
+            predecessor = release[1] if release else None
+            if predecessor and uses_mysql(db, predecessor):
+                predecessor = None
+            if predecessor:
+                self._plan(db, predecessor)
+                db.execute("UPDATE settings SET value=? WHERE key='active_run'", (predecessor,))
+            else:
+                db.execute("DELETE FROM settings WHERE key='active_run'")
+            db.execute("INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,'compensate')",
+                       (run, predecessor))
+            db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'compensated','mysql_unready')",
+                       (run,))
+        return {"status": "compensated", "active_run": predecessor}
+
     def rollback(self, run):
         """Restore the predecessor of the current release in one transaction."""
         with self.connect() as db:
@@ -246,12 +290,18 @@ class ResearchLab:
             row = db.execute('SELECT value FROM settings WHERE key=?', ('active_run',)).fetchone()
         return row[0] if row else None
 
-    def active_for(self, session):
+    def active_for(self, session, *, preferred=None):
         """Bind each visitor to the first active run it encounters."""
         with self.connect() as db:
             bound = db.execute('SELECT run FROM visitor_runs WHERE session=?', (session,)).fetchone()
             if bound:
+                if preferred is not None and preferred != bound[0]:
+                    raise ValueError("Web session is already bound")
                 return bound[0]
+            if preferred is not None:
+                self._plan(db, preferred)
+                db.execute('INSERT INTO visitor_runs VALUES (?,?)', (session, preferred))
+                return preferred
             active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
             if active:
                 db.execute('INSERT INTO visitor_runs VALUES (?,?)', (session, active[0]))

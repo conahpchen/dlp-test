@@ -69,7 +69,10 @@ def test_release_requires_real_mysql_readiness_and_preserves_bound_visitors(tmp_
     }
     assert reopened.active_for("old") == first
     assert reopened.active_for("new") == next_run
-    assert reopened.rollback(next_run)["active_run"] == first
+    assert reopened.compensate_unready() == {"status": "compensated", "active_run": first}
+    assert reopened.active_for("new") == next_run
+    assert reopened.active_for("later") == first
+    assert reopened.release_status(next_run)["attempts"][0]["status"] == "compensated"
 
 
 def test_dashboard_activates_and_serves_compiled_http_routes(tmp_path, monkeypatch, demo_seed):
