@@ -60,6 +60,8 @@ def prepare_release(plan, probe=None):
         "path": "/decoy/" + plan["run_id"] + "/service/" + service.path,
         "node_id": service.node_id,
     } for service in scene.services]
+    if not http_listener_ready(plan):
+        raise ReleasePreparationError("http_unready", "The configured HTTP listener failed readiness")
     selected = ["knowledge_documents", "http_routes"]
     for request in scene.capability_requests:
         if request == "isolated_instance":
@@ -73,3 +75,30 @@ def prepare_release(plan, probe=None):
         "routes": services,
         "new_processes": MAX_NEW_PROCESSES,
     }
+
+
+def http_listener_ready(_plan):
+    import httpx
+
+    configured = os.environ.get("HONEYNET_VISITOR_HEALTH_PORT")
+    if not configured:
+        return True  # Legacy integrated deployment has no separate listener.
+    try:
+        port = int(configured)
+        if not 1 <= port <= 65535:
+            return False
+        with httpx.Client(timeout=2, trust_env=False) as client:
+            reply = client.get(f"http://127.0.0.1:{port}/healthz")
+            return reply.status_code == 200 and reply.json() == {"service": "honeynet-visitor"}
+    except (httpx.HTTPError, OSError, ValueError):
+        return False
+
+
+def unavailable(plan, manifest):
+    checks = {
+        "knowledge_documents": lambda scene: bool(scene.get("documents")),
+        "http_routes": http_listener_ready,
+        "mysql_catalog": lambda _scene: mysql_catalog_ready(),
+    }
+    return sorted({item["name"] for item in manifest["capabilities"]
+                   if item["name"] not in checks or not checks[item["name"]](plan)})

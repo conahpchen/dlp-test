@@ -17,7 +17,7 @@ def install_observer(app, lab_provider, *, allow_model):
     async def observe_business(request, call_next):
         path = request.url.path
         # Control tools never become attacker evidence; decoy routes collect themselves.
-        if path.startswith(('/api/research', '/decoy/', '/v1/')) or path in ('/api/events', '/api/events/ingest'):
+        if path.startswith(('/api/research', '/decoy/', '/v1/')) or path in ('/api/events', '/api/events/ingest', '/healthz'):
             return await call_next(request)
         lab = lab_provider()
         session = request.cookies.get('research_session', '')

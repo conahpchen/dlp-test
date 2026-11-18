@@ -93,3 +93,11 @@
 - 真实 MySQL 服务停止后，控制面复查将新访客切回不依赖该服务的先前场景，已绑定访客保留原版本。当前补偿覆盖场景中的预配置 MySQL 依赖。
 - Linux 入站模式为 HTTP 和 MySQL 启动器提供系统调用限制。实测真实 HTTP 仍响应，进程发起到活跃本机 TCP/UNIX 端点的连接以及 UDP/外发数据报均得到 EPERM。Cowrie、文件权限及完整生产拓扑未验收。
 - `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 392 项通过。Linux 受限进程的真实 PyMySQL 入站握手和查询验证通过。确定性回放以及启动脚本语法检查通过。
+
+
+### 四协议显式绑定、自动补偿与隔离参考拓扑
+
+- Cowrie 在 SSH 认证完成后读取单独传入的版本票据，从只读导出目录载入对应的历史快照。票据不会作为通用环境变量导入或记录，也不会替代 SSH 凭据。
+- 控制面按发布清单检查知识库、HTTP 和 MySQL 两类网络运行时，连续两个相同失败时触发补偿。实际关闭本地 HTTP 健康端点，验证后台任务自动停止向新访客投放，同时保留已有会话。真实 MySQL 停机回退到先前场景的用例仍通过。
+- 隔离镜像内使用 libseccomp，关闭 SSH 转发与 SFTP，保持 Cowrie 真实入站可用。参考拓扑包括受限的 Cowrie、Web/假 AI、MySQL，以及独立鉴权的控制和 Dashboard 监听器。宿主生产账号权限、外部网关和防火墙尚需目标环境验证。
+- `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest HONEYNET_TEST_COWRIE_ISOLATED_IMAGE=dlp-cowrie-isolated:local .venv/bin/python -m pytest -q` 393 项通过，1 条既有依赖弃用警告。隔离镜像默认入口联调单独复跑通过。联合用例同时启动 Cowrie、Web/假 AI、MySQL、控制和 Dashboard，验证四协议同票据、各入口的访问边界及入站响应。

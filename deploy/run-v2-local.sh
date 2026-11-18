@@ -13,6 +13,9 @@ fi
 export RESEARCH_STATE_FILE="$state_dir/research.sqlite"
 export HONEYNET_LATENCY_FILE="$state_dir/http.sqlite"
 python_bin=${PYTHON_BIN:-.venv/bin/python}
+if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ]; then
+  export HONEYNET_VISITOR_HEALTH_PORT="${HONEYNET_VISITOR_HEALTH_PORT:-${HONEYNET_VISITOR_PORT:-8080}}"
+fi
 
 run_public() {
   if [ "${HONEYNET_INGRESS_ONLY:-0}" = 1 ]; then
@@ -56,11 +59,16 @@ case "${1:-}" in
     [ "$projection_dir" != "$checkpoint_dir" ] || {
       echo "Cowrie requires a dedicated export directory" >&2; exit 2;
     }
-    exec docker run --rm -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
+    image=dlp-cowrie-dws:local
+    if [ "${HONEYNET_INGRESS_ONLY:-0}" = 1 ]; then
+      image=dlp-cowrie-isolated:local
+    fi
+    exec docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+      -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
       -e "HONEYNET_COWRIE_PROJECTION=/projection/${projection##*/}" \
       -e "COWRIE_HONEYPOT_HOSTNAME=${HONEYNET_COWRIE_HOST:-web01}" \
       --mount "type=bind,source=$projection_dir,target=/projection,readonly" \
-      "${HONEYNET_COWRIE_IMAGE:-dlp-cowrie-dws:local}"
+      "${HONEYNET_COWRIE_IMAGE:-$image}"
     ;;
   *)
     echo "Usage: $0 visitor|control|dashboard|mysql|cowrie" >&2

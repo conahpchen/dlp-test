@@ -1,0 +1,12 @@
+FROM debian:trixie-slim AS seccomp
+RUN apt-get update && apt-get install -y --no-install-recommends libseccomp2 \
+    && mkdir /export && cp -L "$(dpkg -L libseccomp2 | grep '/libseccomp.so.2$')" /export/libseccomp.so.2
+FROM cowrie/cowrie@sha256:e7c4b4fe5fbb874e682c6c0c7a1daf1c3183c622d5cc2d281f453c1c4d9f97ac
+COPY --from=seccomp /export/libseccomp.so.2 /cowrie/seccomp/libseccomp.so.2
+COPY --chmod=0444 deploy/harden/network.py /cowrie/dws-network.py
+COPY --chmod=0444 entries/cowrie/runtime/start.py /cowrie/dws-start.py
+ENV LD_LIBRARY_PATH=/cowrie/seccomp
+ENV HONEYNET_COWRIE_PROJECTION=/projection/world.sqlite
+ENV COWRIE_HONEYPOT_HOSTNAME=web01
+ENV COWRIE_SSH_FORWARDING=false COWRIE_SSH_SFTP_ENABLED=false
+CMD ["/cowrie/dws-network.py", "/cowrie/dws-start.py", "/cowrie/cowrie-env/bin/twistd", "-n", "--umask=0022", "--pidfile=", "--logger", "cowrie.python.logfile.stdoutLogger", "cowrie"]

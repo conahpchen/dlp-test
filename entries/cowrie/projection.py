@@ -11,8 +11,11 @@ from dws.ids import entity_uuid
 from generation.templates import GroundedTemplates
 
 
-def prepare(world, hostname):
-    version = world.meta["world_version"]
+def prepare(world, hostname, *, version=None):
+    current = world.meta["world_version"]
+    version = current if version is None else version
+    if not 1 <= version <= current:
+        raise ValueError("DWS projection version is unavailable")
     view = world.view(version)
     host_id = entity_uuid("host", hostname)
     if view.current("host", host_id) is None:
@@ -44,6 +47,12 @@ def publish(world, destination, hostname):
     destination = Path(destination)
     if destination.suffix == ".sqlite":
         raise ValueError("SQLite projections must be written with their DWS checkpoint")
+    write_snapshot(snapshot, destination)
+    return snapshot["world_version"]
+
+
+def write_snapshot(snapshot, destination):
+    destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent, delete=False) as stream:
         temporary = Path(stream.name)
@@ -59,7 +68,6 @@ def publish(world, destination, hostname):
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return snapshot["world_version"]
 
 
 if __name__ == "__main__":

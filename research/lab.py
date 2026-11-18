@@ -222,26 +222,37 @@ class ResearchLab:
                 "attempts": [dict(status=status, detail=detail, recorded_at=recorded)
                              for status, detail, recorded in attempts]}
 
-    def compensate_unready(self):
-        """Stop advertising an unhealthy dependency while retaining pinned runs."""
-        from research.service_planner import mysql_catalog_ready
+    def compensate_unready(self, *, inspect_only=False):
+        """Reconcile registered capabilities against the active release."""
+        from research.service_planner import unavailable
 
-        def uses_mysql(db, run):
+        def description(db, run):
+            plan = self._plan(db, run)
             row = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
-            return bool(row and any(item["name"] == "mysql_catalog"
-                                    for item in json.loads(row[0])["capabilities"]))
+            return plan, json.loads(row[0]) if row else None
 
         with self.connect() as db:
             active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
-            if not active or not uses_mysql(db, active[0]):
+            if not active:
                 return {"status": "not_applicable"}
             run = active[0]
-            release = db.execute("SELECT id,previous_run FROM release_history "
+            plan, manifest = description(db, run)
+            if manifest is None:
+                return {"status": "not_applicable"}
+            release = db.execute("SELECT previous_run FROM release_history "
                                  "WHERE next_run=? AND action='activate' ORDER BY id DESC LIMIT 1",
                                  (run,)).fetchone()
             revision = db.execute("SELECT MAX(id) FROM release_history").fetchone()[0]
-        if mysql_catalog_ready():
+            predecessor = release[0] if release else None
+            fallback = description(db, predecessor) if predecessor else None
+
+        failed = unavailable(plan, manifest)
+        if not failed:
             return {"status": "healthy", "active_run": run}
+        if inspect_only:
+            return {"status": "unready", "active_run": run, "failed": failed}
+        if fallback and (fallback[1] is None or unavailable(*fallback)):
+            predecessor = None
 
         with self.connect() as db:
             active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
@@ -249,18 +260,15 @@ class ResearchLab:
                 "SELECT MAX(id) FROM release_history"
             ).fetchone()[0] != revision:
                 return {"status": "stale"}
-            predecessor = release[1] if release else None
-            if predecessor and uses_mysql(db, predecessor):
-                predecessor = None
             if predecessor:
-                self._plan(db, predecessor)
                 db.execute("UPDATE settings SET value=? WHERE key='active_run'", (predecessor,))
             else:
                 db.execute("DELETE FROM settings WHERE key='active_run'")
             db.execute("INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,'compensate')",
                        (run, predecessor))
-            db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'compensated','mysql_unready')",
-                       (run,))
+            code = "mysql_unready" if failed == ["mysql_catalog"] else ",".join(failed)
+            db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'compensated',?)",
+                       (run, code))
         return {"status": "compensated", "active_run": predecessor}
 
     def rollback(self, run):

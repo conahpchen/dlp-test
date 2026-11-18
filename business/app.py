@@ -407,6 +407,12 @@ def _explicit_fake_binding(engine, request, session, key_hash):
         raise HTTPException(401, "Invalid API key") from None
 
 
+@app.get("/healthz")
+def health():
+    get_engine()
+    return {"service": "honeynet-visitor"}
+
+
 @app.get("/v1/models")
 def v1_models(request: Request):
     engine = get_engine()

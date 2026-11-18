@@ -113,3 +113,53 @@ def test_dashboard_activates_and_serves_compiled_http_routes(tmp_path, monkeypat
     with lab.connect() as db:
         db.execute("UPDATE runs SET plan=? WHERE id=?", (json.dumps(plan), run))
     assert public.get(f"/decoy/{run}/service/catalog/undeployed").status_code == 404
+
+
+def test_http_dependency_is_automatically_compensated(tmp_path, monkeypatch, demo_seed):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    from research.api import current_lab
+    from research.control_app import monitor_releases
+
+    class Readiness(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert self.path == "/healthz"
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"service":"honeynet-visitor"}')
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    lab = current_lab()
+    run = lab.create(World(demo_seed), "plain", model=SceneModel())["run_id"]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Readiness)
+    thread = Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        monkeypatch.setenv("HONEYNET_VISITOR_HEALTH_PORT", str(server.server_port))
+        lab.activate(run)
+        assert lab.active_for("already-bound") == run
+        assert lab.compensate_unready() == {"status": "healthy", "active_run": run}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    async def check():
+        stop = asyncio.Event()
+        monitor = asyncio.create_task(monitor_releases(stop, interval=.05))
+        try:
+            async with asyncio.timeout(5):
+                while lab.active() is not None:
+                    await asyncio.sleep(.05)
+        finally:
+            stop.set()
+            await monitor
+
+    asyncio.run(check())
+    assert lab.release_status(run)["attempts"][0]["detail"] == "http_routes"
+    assert lab.active_for("already-bound") == run
+    assert lab.active_for("fresh") is None

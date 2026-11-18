@@ -1,6 +1,8 @@
 """Loopback model and research control listener for isolated deployments."""
 
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,18 +22,39 @@ def checkpoint():
     return engine, state
 
 
+async def monitor_releases(stop, interval=5):
+    prior_failure = None
+    while not stop.is_set():
+        try:
+            lab = current_lab()
+            result = await asyncio.to_thread(lab.compensate_unready, inspect_only=True)
+            failure = (result["active_run"], tuple(result["failed"])) if result["status"] == "unready" else None
+            if failure is not None and failure == prior_failure:
+                await asyncio.to_thread(lab.compensate_unready)
+                failure = None
+            prior_failure = failure
+        except Exception as exc:
+            prior_failure = None
+            logging.getLogger(__name__).warning("Release health probe failed (%s)", type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(_app):
-    if not enabled():
-        yield
-        return
     stop = asyncio.Event()
-    task = asyncio.create_task(consume(current_lab, stop))
+    tasks = []
+    if enabled():
+        tasks.append(asyncio.create_task(consume(current_lab, stop)))
+    if os.environ.get("HONEYNET_RELEASE_MONITOR") == "1":
+        tasks.append(asyncio.create_task(monitor_releases(stop)))
     try:
         yield
     finally:
         stop.set()
-        await task
+        await asyncio.gather(*tasks)
 
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)

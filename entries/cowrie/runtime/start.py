@@ -1,10 +1,15 @@
 """Cowrie 3.1.7 adapter loaded in the sensor process only."""
 
+import hashlib
 import json
 import os
+import re
 import runpy
 import sqlite3
+import struct
 from contextlib import closing
+from contextvars import ContextVar
+from time import time
 import sys
 from pathlib import Path
 
@@ -22,6 +27,64 @@ def read_projection(projection):
 
 def install(projection):
     from cowrie.shell import fs
+    from cowrie.ssh.session import HoneyPotSSHSession
+    from twisted.conch.ssh.common import getNS
+
+    selected = ContextVar("ssh_dws_binding", default=None)
+    request_env = HoneyPotSSHSession.request_env
+
+    def binding_env(channel, data):
+        try:
+            name, rest = getNS(data)
+            if name != b"HONEYNET_BINDING":
+                return request_env(channel, data)
+            value, trailing = getNS(rest)
+            if trailing or channel.client is not None or getattr(channel, "dws_binding", None) is not None:
+                channel.dws_binding = False
+                return 0
+            if not re.fullmatch(rb"[a-f0-9]{24}", value):
+                channel.dws_binding = False
+                return 0
+            identifier = hashlib.sha256(value).hexdigest()
+            path = Path(projection).parent / "bindings" / (identifier + ".json")
+            snapshot = read_projection(path)
+            if (snapshot["expires_at"] <= time() or snapshot["schema"] != 1
+                    or snapshot["hostname"] != os.environ["COWRIE_HONEYPOT_HOSTNAME"]):
+                channel.dws_binding = False
+                return 0
+            channel.dws_binding = snapshot
+            return 1
+        except (TypeError, ValueError, KeyError, OSError, struct.error):
+            channel.dws_binding = False
+            return 0
+
+    def with_binding(original):
+        def request(channel, data):
+            snapshot = getattr(channel, "dws_binding", None)
+            if snapshot is False or (snapshot and snapshot["expires_at"] <= time()):
+                return 0
+            server = getattr(channel.avatar, "server", None)
+            filesystem = getattr(server, "fs", None)
+            rebind = snapshot and filesystem and filesystem.dws_world_version != snapshot["world_version"]
+            if rebind and getattr(server, "_dws_started", False):
+                return 0
+            token = selected.set(snapshot)
+            try:
+                if rebind:
+                    # Cowrie can initialize its filesystem during PTY setup
+                    # before the client sends environment requests.
+                    initialize_with_dws(filesystem, filesystem.arch, filesystem.home)
+                result = original(channel, data)
+                if result and server is not None:
+                    server._dws_started = True
+                return result
+            finally:
+                selected.reset(token)
+        return request
+
+    HoneyPotSSHSession.request_env = binding_env
+    HoneyPotSSHSession.request_shell = with_binding(HoneyPotSSHSession.request_shell)
+    HoneyPotSSHSession.request_exec = with_binding(HoneyPotSSHSession.request_exec)
 
     initialize = fs.HoneyPotFilesystem.__init__
 
@@ -35,7 +98,7 @@ def install(projection):
             raise ValueError("Invalid projected directory")
 
     def initialize_with_dws(filesystem, *args, **kwargs):
-        snapshot = read_projection(projection)
+        snapshot = selected.get() or read_projection(projection)
         if snapshot["schema"] != 1 or snapshot["hostname"] != os.environ["COWRIE_HONEYPOT_HOSTNAME"]:
             raise ValueError("Cowrie hostname and DWS projection must agree")
         initialize(filesystem, *args, **kwargs)

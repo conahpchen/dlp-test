@@ -64,6 +64,6 @@ deploy/run-v2-local.sh cowrie
 
 ### 版本绑定、依赖补偿和入口隔离
 
-- 操作员可通过 `POST /api/evidence/runs/{run_id}/bindings` 为已有发布签发一小时的版本选择票据。Web 根入口和集成假 AI API 接收 `X-Honeynet-Binding`，MySQL 使用返回的合成用户名和既有目录密码。票据不替代协议身份验证。已建立会话维持原来的版本。Cowrie 尚未接入这种显式票据。
-- 控制面 `POST /api/research/active/reconcile` 复查当前发布声明的本地 MySQL 依赖。不可用时恢复不依赖 MySQL 的前一发布，若不存在则停止向新访客投放；已有访客保持其原场景。
-- Linux 机器安装 `libseccomp.so.2` 后，可为 visitor 和 mysql 启动设置 `HONEYNET_INGRESS_ONLY=1`。这两个进程的出站连接和数据报操作被系统调用阻断，正常回环入口仍可接入。visitor 使用本地 DWS 而非直连 Postgres。Cowrie 镜像、身份与文件权限隔离，以及外部部署编排需要单独验证。
+- 操作员可通过 `POST /api/evidence/runs/{run_id}/bindings` 为已有发布签发一小时的版本选择票据。Web 根入口和集成假 AI API 接收 `X-Honeynet-Binding`，MySQL 使用返回的合成用户名和既有目录密码。票据不替代协议身份验证。已建立会话维持原来的版本。若配置了 Cowrie 专用投影目录，签发时同时导出终端安全的历史快照，并返回 `ssh_environment=HONEYNET_BINDING`。登录时在可信客户端设置这个单独的票据变量，并添加 OpenSSH 参数 `-o SendEnv=HONEYNET_BINDING`，SSH 保持独立认证。
+- 控制面 `POST /api/research/active/reconcile` 复查当前发布的知识库、HTTP 监听器和已声明的本地 MySQL 依赖。设置 `HONEYNET_RELEASE_MONITOR=1` 后控制进程每 5 秒检查，同一故障连续两次触发补偿。不可用时恢复健康的前一发布，若不存在则停止向新访客投放；已有访客保持其原场景。
+- Linux 机器安装 `libseccomp.so.2` 后，可为 visitor 和 mysql 启动设置 `HONEYNET_INGRESS_ONLY=1`。这两个进程的出站连接和数据报操作被系统调用阻断，正常回环入口仍可接入。visitor 使用本地 DWS 而非直连 Postgres。Cowrie 可使用同一入站模式。先构建 `docker build -f deploy/Dockerfile.cowrie-isolated -t dlp-cowrie-isolated:local .`，再以 `HONEYNET_INGRESS_ONLY=1 deploy/run-v2-local.sh cowrie` 启动。该镜像关闭 SSH 转发与 SFTP，并限制出站连接。管理面和控制面仍使用独立的回环监听器。外部反向代理、宿主账号及持久目录权限需要按目标部署验证。

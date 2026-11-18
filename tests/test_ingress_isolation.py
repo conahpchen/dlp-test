@@ -3,6 +3,7 @@ import os
 import socket
 import subprocess
 import sys
+from contextlib import contextmanager
 
 import pytest
 
@@ -56,11 +57,42 @@ denied(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM))
                        check=True, timeout=5)
 
 
-def test_mysql_listener_replies_under_linux_ingress_policy(demo_seed, tmp_path, monkeypatch):
+@contextmanager
+def mysql_listener(checkpoint, research):
     import time
 
     import pymysql
 
+    with socket.socket() as temporary:
+        temporary.bind(("127.0.0.1", 0))
+        port = temporary.getsockname()[1]
+    env = dict(os.environ, HONEYNET_MYSQL_PORT=str(port), HONEYNET_MYSQL_PASSWORD="synthetic-catalog",
+               BUSINESS_STATE_FILE=str(checkpoint), RESEARCH_STATE_FILE=str(research))
+    for name in ("RESEARCH_MODEL_API_KEY", "HONEYNET_CONTROL_TOKEN", "HONEYNET_DASHBOARD_PASSWORD"):
+        env.pop(name, None)
+    process = subprocess.Popen([sys.executable, "-m", "deploy.harden.network", "entries.mysql.app"], env=env)
+
+    def connect(username="catalog_reader"):
+        return pymysql.connect(host="127.0.0.1", port=port, user=username,
+                               password="synthetic-catalog", connect_timeout=1, read_timeout=2)
+
+    try:
+        until = time.monotonic() + 5
+        while True:
+            try:
+                with connect():
+                    break
+            except pymysql.OperationalError:
+                if process.poll() is not None or time.monotonic() >= until:
+                    raise
+                time.sleep(.15)
+        yield connect
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+def test_mysql_listener_replies_under_linux_ingress_policy(demo_seed, tmp_path, monkeypatch):
     from business.enterprise import enrich_seed
     from business.storage import persist
     from dws.world import World
@@ -69,26 +101,7 @@ def test_mysql_listener_replies_under_linux_ingress_policy(demo_seed, tmp_path, 
     checkpoint = tmp_path / "world.sqlite"
     monkeypatch.setenv("BUSINESS_STATE_FILE", str(checkpoint))
     persist(Engine(World(enrich_seed(demo_seed))), [], [])
-    with socket.socket() as temporary:
-        temporary.bind(("127.0.0.1", 0))
-        port = temporary.getsockname()[1]
-    env = dict(os.environ, HONEYNET_MYSQL_PORT=str(port), HONEYNET_MYSQL_PASSWORD="synthetic-catalog",
-               RESEARCH_STATE_FILE=str(tmp_path / "research.sqlite"))
-    process = subprocess.Popen([sys.executable, "-m", "deploy.harden.network", "entries.mysql.app"], env=env)
-    try:
-        until = time.monotonic() + 5
-        while True:
-            try:
-                with pymysql.connect(host="127.0.0.1", port=port, user="catalog_reader",
-                                     password="synthetic-catalog", connect_timeout=1, read_timeout=2) as db:
-                    with db.cursor() as cursor:
-                        cursor.execute("SELECT 1")
-                        assert cursor.fetchone() == (1,)
-                    break
-            except pymysql.OperationalError:
-                if process.poll() is not None or time.monotonic() >= until:
-                    raise
-                time.sleep(.15)
-    finally:
-        process.terminate()
-        process.wait(timeout=5)
+    with mysql_listener(checkpoint, tmp_path / "research.sqlite") as connect:
+        with connect() as db, db.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            assert cursor.fetchone() == (1,)
