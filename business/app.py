@@ -9,12 +9,15 @@ Engine——业务与 LLM 入口世界强一致）+ 前端页面。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import json
 import os
 import re
 import secrets
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -29,7 +32,41 @@ from replay.engine import Engine
 
 REPO = Path(__file__).resolve().parents[1]
 
-app = FastAPI(title="澄川研发服务平台", docs_url=None, redoc_url=None, openapi_url=None)
+def _apply_publication():
+    from business.publications import apply_next
+
+    with _lock:
+        apply_next(get_engine(), _checkpoint)
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    if os.environ.get("HONEYNET_DWS_ATOMIC") != "1":
+        yield
+        return
+
+    stopping = asyncio.Event()
+
+    async def run():
+        while not stopping.is_set():
+            try:
+                await asyncio.to_thread(_apply_publication)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("DWS publication worker failed (%s)", type(exc).__name__)
+            try:
+                await asyncio.wait_for(stopping.wait(), timeout=1)
+            except TimeoutError:
+                pass
+
+    worker = asyncio.create_task(run())
+    try:
+        yield
+    finally:
+        stopping.set()
+        await worker
+
+
+app = FastAPI(title="澄川研发服务平台", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 _lock = threading.RLock()  # 可重入：_audit 锁内调 get_engine（历史教训见 §13 运行约束）
 _engine: Engine | None = None
 _sessions: dict = {}  # token -> {username, identity_eid, role, cred_hash}

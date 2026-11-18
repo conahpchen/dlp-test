@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据发布 · 蜜网管理</title>
+<style>
+body{font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938} header{padding:1rem 2rem;background:#17283f;color:white}
+header a{color:white} main{max-width:52rem;margin:2rem auto;padding:0 1rem}
+form,article{background:white;border-radius:.5rem;padding:1rem;margin:1rem 0}
+label{display:block;margin:1rem 0} textarea,input{display:block;width:100%;box-sizing:border-box;font:inherit}
+button{font:inherit;color:white;background:#17283f;border:0;padding:.5rem .85rem;border-radius:.25rem}
+pre{white-space:pre-wrap;overflow-wrap:anywhere}
+</style>
+<header><a href="/">返回运行总览</a></header>
+<main>
+<h1>合成数据发布</h1>
+<form>
+<label>载入现有文档 <select id="existing"><option value="">新建文档</option></select></label>
+<label>知识库文档路径 <input id="path" placeholder="/kb/example.md" required></label>
+<label>合成内容 <textarea id="content" rows="5" maxlength="4096" required></textarea></label>
+<button type="submit">保存发布草稿</button>
+</form>
+<h2>发布记录</h2>
+<button id="reload" type="button">刷新状态</button>
+<p id="status" role="status"></p>
+<div id="history"></div>
+</main>
+<script>
+const status = document.querySelector('#status');
+const historyPanel = document.querySelector('#history');
+const existing = document.querySelector('#existing');
+let snapshot = null;
+async function loadDocuments() {
+  snapshot = await request('/api/publication-documents');
+  existing.replaceChildren(new Option('新建文档', ''));
+  for (const document of snapshot.documents) existing.add(new Option(document.path, document.path));
+}
+existing.onchange = () => {
+  const document = snapshot.documents.find(item => item.path === existing.value);
+  documentQuery('#path').value = document?.path ?? '';
+  documentQuery('#content').value = document?.content ?? '';
+};
+const documentQuery = selector => document.querySelector(selector);
+const labels = {
+  draft:'待审核', approved:'等待发布', active:'已发布',
+  rollback_pending:'等待撤回', rolled_back:'已撤回', rejected:'已拒绝'
+};
+async function request(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : '请检查输入字段');
+  return result;
+}
+async function refresh() {
+  const proposals = await request('/api/publications');
+  historyPanel.replaceChildren();
+  for (const row of proposals) {
+    const article = document.createElement('article');
+    const title = document.createElement('h3');
+    title.textContent = row.path;
+    const summary = document.createElement('p');
+    summary.textContent = labels[row.status] + ' · 基线 ' + row.base_version +
+      (row.result_version ? ' · DWS 版本 ' + row.result_version : '');
+    const content = document.createElement('pre');
+    content.textContent = row.content;
+    article.append(title, summary, content);
+    if (row.error) {
+      const error = document.createElement('p');
+      error.textContent = row.error;
+      article.append(error);
+    }
+    if (row.status === 'draft' || row.status === 'active') {
+      const button = document.createElement('button');
+      button.textContent = row.status === 'draft' ? '审核通过并发布' : '撤回发布';
+      button.onclick = () => perform(async () => {
+        await request('/api/publications/' + row.id + '/' + (row.status === 'draft' ? 'approve' : 'rollback'), {});
+        status.textContent = '已加入发布队列';
+      });
+      article.append(button);
+    }
+    historyPanel.append(article);
+  }
+}
+async function perform(action) {
+  try {
+    if (action) await action();
+    await refresh();
+  } catch (error) {
+    status.textContent = error.message;
+  }
+}
+document.querySelector('#reload').onclick = () => perform();
+document.querySelector('form').onsubmit = event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  perform(async () => {
+    if (!snapshot) await loadDocuments();
+    await request('/api/publications', {
+      path:form.querySelector('#path').value,
+      content:form.querySelector('#content').value,
+      base_version:snapshot.world_version
+    });
+    form.reset();
+    await loadDocuments();
+    status.textContent = '草稿已保存';
+  });
+};
+perform(loadDocuments);
+</script>
+</html>

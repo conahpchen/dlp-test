@@ -44,3 +44,6 @@ deploy/run-v2-local.sh cowrie
 新实例在启动所有入口前设置 `HONEYNET_DWS_ATOMIC=1`，将 `HONEYNET_COWRIE_EXPORT` 指向专用目录中的 `world.sqlite`，目录权限须允许 Cowrie 容器的 UID 999 读取。保留 checkpoint 目录的私有权限。两目录必须位于同一台主机的同一文件系统。依次启动 visitor 并访问其 `/v1/models` 初始化已提交快照，再启动 control、dashboard、mysql 和 cowrie。SQLite 模式直接初始化 Cowrie 导出，省掉上面手工 JSON 导出步骤。
 
 老 JSON 实例照常读取。使用单独的状态目录可以演练 SQLite 模式。SQLite 事务覆盖本机 DWS checkpoint 和 Cowrie 投影。Web 场景活动状态、外部服务启停和跨协议会话关联仍是独立状态。
+
+
+在原子模式的 Dashboard 打开「数据发布」。可载入或新建 `/kb/*.md` 中的合成常规文档，保存后审批发布。发布 worker 由单写入 visitor 进程运行，成功提交后才显示已发布。基线文档在编辑期间发生变化时，旧草稿会被拒绝。可追加撤回版本，读取原来版本的 Web 和 SSH 会话保留其事实。该页面当前支持知识库文档，协议和服务级发布还需进一步接入。
