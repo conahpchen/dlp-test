@@ -109,3 +109,13 @@
 - `tests/test_isolated_mysql_release.py` 实测缺少审批、镜像不存在、成功启动、查询 JOIN、客户端事务回滚、Docker 停机后场景补偿、人工回滚、清理容器和临时凭据。首轮 Docker 启动超时后发现一个测试容器停在 Created，已清理并将创建与启动分开，增加本机 Docker 操作超时。组合验证继续使用真实 Cowrie 镜像。
 - 本次 L3 范围为获授权的本机 Unix socket 与完整 MySQL，独立 HTTP/其他协议运行时和目标生产环境外部入口仍不在已验收范围。
 - 最终组合验证启用 `HONEYNET_TEST_L3_MYSQL_IMAGE=mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902`、`HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest`、`HONEYNET_TEST_COWRIE_ISOLATED_IMAGE=dlp-cowrie-isolated:local`。执行 `.venv/bin/python -m pytest -q` 得到 394 项通过、1 条既有依赖弃用警告，Docker 无遗留测试 L3 容器。确定性回放也通过。
+
+### 临时部署验收与演示
+
+- 新增 L3 独立 HTTP。真实 Nginx 使用无网络、无宿主端口的容器和本地 Unix socket 提供绑定版本的只读 DWS 投影。控制面审批、健康检查、故障回退和清理与 MySQL L3 共用发布流程。两者共用一个运行额度。
+- 临时 HTTPS 网关已通过真实 Nginx 联调。实际 OA、假 AI 请求可通过 TLS，管理、控制、审计和内部健康路径由网关返回 404。外部入口使用本机回环地址和临时测试证书。本次未连接目标生产主机。
+- Dashboard 新增部署运行页，显示真实监听器探测、发布及健康结果、最近请求窗口 p95、DWS 变更摘要和预算账本，同时保留模板、数据审批和会话证据页面。Chromium 截图来自真实临时 HTTP 与 Dashboard 实例。
+- 全量首轮暴露官方 MySQL 镜像初始化阶段与正式进程切换之间的健康检查竞态。就绪检查现要求 mysqld 已成为容器主进程，再进行认证查询。
+- 上机前文档和一键本机验收见 [DEMO_V2.md](DEMO_V2.md)。项目保留的缺项见 [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md)。
+- 今日复测真实模型。首个创建请求返回 HTTP 502，独立生成及审核检查随后通过。通过独立 visitor/control 监听器复跑后，SQLite 中存在真实生成的 run，发布历史顺序为 activate、rollback，访客记录包含一次场景访问。未输出供应商凭据或原始数据。
+- 最终从当前代码执行 `deploy/check-v2.sh`，使用原版 Cowrie、隔离版 Cowrie、固定摘要 MySQL 8.4 与固定摘要 Nginx 镜像。396 项通过、1 条既有弃用警告，逐字节校验通过，10,000 轨迹共 164,003 事件，0 不变量违反、0 确定性失败。临时参考环境通过本轮自动演练，目标生产验收及需求追踪余项仍未完成。

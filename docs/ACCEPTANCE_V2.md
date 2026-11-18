@@ -15,3 +15,6 @@
 启用真实 Cowrie Canary 集成测试时执行 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest python -m pytest -q tests/test_cowrie_canary_integration.py`。该测试需要本机 Docker、Cowrie 镜像、OpenSSH 客户端。
 
 真实 Cowrie 投影使用 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest python -m pytest -q tests/test_cowrie_projection_integration.py`。同一 DWS 提交分别改变文件和假 AI 模型列表，已有会话保留各自的初始版本。
+
+
+本机联合演练统一执行 `deploy/check-v2.sh`，前置镜像和演示入口见 [DEMO_V2.md](DEMO_V2.md)。覆盖真实 Cowrie/OpenSSH、L2 和 L3 MySQL、L3 Nginx Unix socket、OA 与假 AI HTTPS 入口、控制面和 Dashboard。目标生产机器的外部网关和权限验收单独记录。

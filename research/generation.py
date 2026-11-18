@@ -41,7 +41,7 @@ class Scene(Strict):
     capability_requests: list[Literal["mysql_catalog", "isolated_instance"]] = Field(
         default_factory=list, max_length=2
     )
-    isolated_reason: Literal["relational_sql", "sql_transactions"] | None = None
+    isolated_reason: Literal["relational_sql", "sql_transactions", "standalone_http"] | None = None
 
 
 class Review(Strict):
@@ -57,7 +57,8 @@ SCENE_FORMAT = '''scene schema: {"title":"...","entry_node":"node-id",
 "lure_instruction":null or "an original in-service verification request"}]}.
 Optional capability_requests can include "mysql_catalog" for a preconfigured read-only
 catalog. Request "isolated_instance" only when relational SQL or transactions are essential;
-set isolated_reason to "relational_sql" or "sql_transactions" respectively. Never promise
+set isolated_reason to "relational_sql" or "sql_transactions" respectively. An independently
+served static HTTP projection uses "standalone_http". Never promise
 a protocol that has not been approved and checked at publication. Specify no endpoint,
 port, credential or process command.
 Use 2-8 reachable nodes. Generate substantive, coherent business narratives, navigation and

@@ -207,9 +207,9 @@ class ResearchLab:
                 if active != previous or latest_revision != revision or self._plan(db, run) != plan:
                     raise ValueError('Release changed during preparation')
                 if manifest["new_processes"]:
-                    from research import isolated_mysql
+                    from research.service_planner import isolated_runtime
 
-                    if not isolated_mysql.ready(run):
+                    if not isolated_runtime(plan).ready(run):
                         raise ValueError("Isolated runtime changed during preparation")
                 db.execute("INSERT OR REPLACE INTO release_manifests VALUES (?,?)", (run, json.dumps(manifest)))
                 db.execute("INSERT INTO release_preparations(run,status) VALUES (?,'prepared')", (run,))
@@ -224,16 +224,17 @@ class ResearchLab:
         return dict(active_run=run, entry=f'/decoy/{run}/index')
 
     def _retire_isolated(self, run):
-        from research import isolated_mysql
+        from research.isolated_mysql import RuntimeUnavailable
+        from research.service_planner import isolated_runtime
 
         with self.connect() as db:
             active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
             if active and active[0] == run:
                 return False
             try:
-                isolated_mysql.stop(run)
+                isolated_runtime(self._plan(db, run)).stop(run)
                 return True
-            except isolated_mysql.RuntimeUnavailable:
+            except RuntimeUnavailable:
                 db.execute("INSERT INTO release_preparations(run,status,detail) "
                            "VALUES (?,'cleanup_failed','isolated_runtime')", (run,))
                 return False

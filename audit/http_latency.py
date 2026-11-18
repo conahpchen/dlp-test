@@ -28,7 +28,7 @@ def samples():
         return []
     with closing(open_samples(path)) as db:
         table = db.execute("SELECT 1 FROM sqlite_master WHERE name='http_samples'").fetchone()
-        return db.execute("SELECT status,duration_ns FROM http_samples").fetchall() if table else []
+        return db.execute("SELECT status,duration_ns FROM http_samples ORDER BY id").fetchall() if table else []
 
 
 def install(app):

@@ -86,7 +86,7 @@ def _instance(run):
     return image, directory, directory / run, "honeynet-l3-" + run
 
 
-def _inspect(name):
+def _inspect(name, *, label="isolated-mysql"):
     result = _docker("container", "inspect", name, check=False)
     if result.returncode:
         if "No such" in result.stderr:
@@ -94,7 +94,7 @@ def _inspect(name):
         raise RuntimeUnavailable("Cannot inspect isolated runtime")
     row = json.loads(result.stdout)[0]
     labels = row["Config"]["Labels"] or {}
-    if labels.get("org.honeynet.runtime") != "isolated-mysql":
+    if labels.get("org.honeynet.runtime") != label:
         raise RuntimeUnavailable("Container ownership does not match")
     return row
 
@@ -105,6 +105,11 @@ def _ready(instance, name):
     status = _inspect(name)
     if (not status or not status["State"]["Running"] or status["HostConfig"]["NetworkMode"] != "none"
             or status["HostConfig"]["PortBindings"]):
+        return False
+    # The official entrypoint runs a transient SQL server during initialization.
+    # The container's main process must have switched to mysqld before publication.
+    process = _docker("exec", name, "/bin/cat", "/proc/1/comm", check=False)
+    if process.returncode or process.stdout.strip() != "mysqld":
         return False
     try:
         password = (instance / "catalog.password").read_text()
@@ -133,7 +138,7 @@ def start(plan):
     with locked(directory):
         if _inspect(name):
             raise RuntimeUnavailable("This isolated release already has an instance")
-        existing = _docker("ps", "-aq", "--filter", "label=" + MANAGED_LABEL).stdout.strip()
+        existing = _docker("ps", "-aq", "--filter", "label=org.honeynet.runtime").stdout.strip()
         if existing:
             raise RuntimeUnavailable("Isolated runtime capacity reached")
         if instance.exists():
@@ -183,8 +188,8 @@ def start(plan):
             raise
 
 
-def _remove(instance, name):
-    if _inspect(name):
+def _remove(instance, name, *, label="isolated-mysql"):
+    if _inspect(name, label=label):
         _docker("rm", "--force", "--volumes", name)
     if instance.exists():
         shutil.rmtree(instance)

@@ -50,7 +50,10 @@ def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_pa
     with ExitStack() as stack:
         public = stack.enter_context(listener("business.app:app", dict(common, HONEYNET_VISITOR_ONLY="1")))
         control = stack.enter_context(listener("research.control_app:app", dict(common, HONEYNET_CONTROL_TOKEN="test-control")))
-        dashboard = stack.enter_context(listener("management.app:app", dict(common, HONEYNET_DASHBOARD_PASSWORD="test-dashboard")))
+        dashboard = stack.enter_context(listener("management.app:app", dict(
+            common, HONEYNET_DASHBOARD_PASSWORD="test-dashboard",
+            HONEYNET_VISITOR_PORT=str(public.base_url.port),
+        )))
         headers = {"x-control-token": "test-control"}
         assert public.get("/api/research/status", headers=headers).status_code == 404
         assert control.get("/api/research/status").status_code == 404
@@ -69,6 +72,12 @@ def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_pa
         assert data["http_response_p95_ms"] > 0
         operator = ("operator", "test-dashboard")
         assert public.get("/api/templates").status_code == 404
+        assert public.get("/api/operations").status_code == 404
+        assert dashboard.get("/operations").status_code == 401
+        assert "部署与运行" in dashboard.get("/operations", auth=operator).text
+        operations = dashboard.get("/api/operations", auth=operator).json()
+        assert operations["listeners"][0]["status"] == "responding"
+        assert operations["latency_windows"][0]["p95_ms"] > 0
         assert dashboard.get("/templates").status_code == 401
         assert dashboard.get("/templates", auth=operator).status_code == 200
         template = dashboard.post("/api/templates", auth=operator, json={

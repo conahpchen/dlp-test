@@ -3,7 +3,7 @@
 import os
 from dataclasses import asdict, dataclass
 
-from research import isolated_mysql
+from research import isolated_http, isolated_mysql
 from research.generation import validate_scene
 
 
@@ -20,6 +20,7 @@ CAPABILITIES = {
     "http_routes": Capability(1, "http", "existing_visitor_listener", "low"),
     "mysql_catalog": Capability(2, "mysql", "configured_loopback", "moderate"),
     "isolated_instance": Capability(3, "mysql", "local_private_unix_socket", "high"),
+    "isolated_http": Capability(3, "http", "local_private_unix_socket", "high"),
 }
 MAX_HTTP_ROUTES = 8
 MAX_NEW_PROCESSES = 1
@@ -49,6 +50,10 @@ def mysql_catalog_ready():
         return False
 
 
+def isolated_runtime(plan):
+    return isolated_http if plan.get("scene", {}).get("isolated_reason") == "standalone_http" else isolated_mysql
+
+
 def prepare_release(plan, probe=None, *, approve_isolated=False):
     try:
         scene = validate_scene(plan["scene"], plan["documents"])
@@ -73,17 +78,17 @@ def prepare_release(plan, probe=None, *, approve_isolated=False):
         if not approve_isolated:
             raise ReleasePreparationError("approval_required", "No approved isolated runtime for this release")
         if not scene.isolated_reason:
-            raise ReleasePreparationError("missing_requirement", "An isolated runtime requires a full SQL capability")
+            raise ReleasePreparationError("missing_requirement", "An isolated runtime requires an explicit capability requirement")
         try:
-            isolated_mysql.start(plan)
+            isolated_runtime(plan).start(plan)
         except isolated_mysql.RuntimeUnavailable as exc:
             raise ReleasePreparationError("runtime_unavailable", str(exc)) from None
-        selected.append("isolated_instance")
+        selected.append("isolated_http" if isolated_runtime(plan) is isolated_http else "isolated_instance")
     return {
         "world_version": plan["world_version"],
         "capabilities": [{"name": name, **asdict(CAPABILITIES[name])} for name in selected],
         "routes": services,
-        "new_processes": MAX_NEW_PROCESSES if "isolated_instance" in selected else 0,
+        "new_processes": MAX_NEW_PROCESSES if "isolated_instance" in requests else 0,
     }
 
 
@@ -110,6 +115,7 @@ def unavailable(plan, manifest):
         "http_routes": http_listener_ready,
         "mysql_catalog": lambda _scene: mysql_catalog_ready(),
         "isolated_instance": lambda scene: isolated_mysql.ready(scene["run_id"]),
+        "isolated_http": lambda scene: isolated_http.ready(scene["run_id"]),
     }
     return sorted({item["name"] for item in manifest["capabilities"]
                    if item["name"] not in checks or not checks[item["name"]](plan)})

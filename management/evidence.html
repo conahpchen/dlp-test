@@ -89,7 +89,7 @@ function renderRelease(run, release) {
     if (action === 'activate') {
       isolated.type = 'checkbox';
       const caption = document.createElement('label');
-      caption.append(isolated, '批准本机隔离 MySQL 实例');
+      caption.append(isolated, '批准本机隔离服务实例');
       card.append(caption);
     }
     button.onclick = async () => {

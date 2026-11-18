@@ -76,3 +76,8 @@ deploy/run-v2-local.sh cowrie
 运行时最多一个实例。容器无网络、无宿主端口、使用只读根文件系统和临时数据目录，CPU、内存与进程数受限。初始化只读取已绑定版本的 DWS 文档路径、事实标识和版本。获授权的本机操作者可使用该目录下 `{run_id}/socket/mysql.sock` 和私有 `{run_id}/catalog.password`，账号为 `catalog_reader`。普通访客的 Web 和 SSH 版本绑定不受此账号控制。
 
 回滚或故障补偿从投放中撤回该实例并清理容器、数据卷和临时文件。若上一次已切到另一发布，可用 `POST /api/research/runs/{run_id}/release/retire` 清理非活跃的暂留实例。现场网关及其他协议的 L3 能力需独立配置、审批和验证。
+
+
+独立 HTTP L3 使用 `HONEYNET_L3_HTTP_IMAGE=nginx@sha256:…`，场景声明 `isolated_instance` 与 `isolated_reason=standalone_http`，以相同的操作员审批流程激活。只读 DWS 文档投影经本机 `{run_id}/socket/http.sock` 提供。HTTP 与 MySQL L3 共用一个运行额度。独立 HTTP 不经访客 HTTPS 网关转发。
+
+临时 HTTPS、Dashboard 演示及本机入口验收命令见 [DEMO_V2.md](DEMO_V2.md)。
