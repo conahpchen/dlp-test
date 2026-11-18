@@ -85,17 +85,17 @@ class Engine:
 
     # ------------------------------------------------------------ 提交
 
-    def _commit(self, session_id, proposals, hlc, attacker_id=None) -> None:
+    def _commit(self, session_id, proposals, hlc, attacker_id=None, *, private=False) -> None:
         """CAS 提交：冲突重试一次（契约 §5.3），仍冲突 → fail-closed。"""
         try:
             self.world.commit(session_id, proposals, self.world.meta["world_version"],
-                              str(hlc), attacker_id=attacker_id)
+                              str(hlc), attacker_id=attacker_id, private=private)
         except CommitConflict:
             self.metrics["cas_conflicts"] += 1
             try:
                 self.world.commit(session_id, proposals,
                                   self.world.meta["world_version"], str(hlc),
-                                  attacker_id=attacker_id)
+                                  attacker_id=attacker_id, private=private)
             except CommitConflict:
                 raise GroundingMiss("CAS 二次冲突，fail-closed")
 
@@ -184,7 +184,7 @@ class Engine:
         all_props = [self._timeline(event, "cmd", f"host:{sess.host_entity_id}")] + proposals
         if proposals:
             try:
-                self._commit(event["session"], all_props, hlc)
+                self._commit(event["session"], all_props, hlc, private=True)
             except CommitRejected:
                 # 预算超限/裁决拒绝 → fail-closed：拒绝扩张但不矛盾（契约 §5.2/§5.3）
                 return ("rejected", [f"bash: {argv[0]}: Operation not permitted"], "template")

@@ -112,3 +112,23 @@ def test_failed_web_activation_keeps_previous_release_after_restart(demo_seed, t
     assert recovered.active() == first
     assert recovered.rollback(first) == {"active_run": None}
     assert ResearchLab(lab.path).active() is None
+
+
+def test_ssh_simulated_write_stays_private_after_restart(demo_seed, demo_events, monkeypatch, tmp_path):
+    from dws.ids import entity_uuid
+
+    monkeypatch.setenv("BUSINESS_STATE_FILE", str(tmp_path / "world.json"))
+    engine = Engine(World(demo_seed))
+    events = copy.deepcopy(demo_events)
+    for event in events[:11]:
+        engine.process(event)
+    path = entity_uuid("data", "/home/deploy/report.txt")
+    session_id = events[0]["session"]
+    assert engine.session_view(session_id).current("data", path) is not None
+    assert engine.session_view().current("data", path) is None
+    storage.persist(engine, [], [])
+    recovered = Engine(World(demo_seed))
+    storage.restore(recovered)
+    assert recovered.session_view(session_id).current("data", path) is not None
+    fresh = recovered.world.open_session("fresh", "other", "deploy", None)
+    assert recovered.session_view(fresh.session_id).current("data", path) is None

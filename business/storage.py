@@ -37,6 +37,7 @@ def restore(engine):
                             new_entities={tuple(item) for item in row["new_entities"]}))
         for key, row in state.get("sessions", {}).items()
     }
+    engine.world.private_versions = set(state.get("private_versions", ()))
     engine.biz_seq = state["biz_seq"]
     clock = HLC.parse(engine.world.meta["now_hlc"])
     engine.clock.seconds = clock.seconds
@@ -57,6 +58,7 @@ def persist(engine, audit, events):
             for key, session in engine.world.sessions.items()
         },
         meta=engine.world.meta,
+        private_versions=sorted(engine.world.private_versions),
         biz_seq=engine.biz_seq,
         facts={
             cls: {eid: [f.to_row() for f in rows] for eid, rows in entities.items()}
