@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
+from research.model_input import model_event
+from research.worker import enabled as async_adaptation, enqueue, result_status
 from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX, ResearchLab
 
 
@@ -202,10 +204,15 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
             enabled = (surface == 'integrated' and os.environ.get(
                 'RESEARCH_ADAPTIVE_ENABLED', '1' if plan.get('origin') == 'ai' else '0') == '1')
             outcome = None
+            queued = False
+            background_mode = surface == 'visitor' and async_adaptation()
             if is_input:
-                await run_in_threadpool(lab.observe, run_id, session, peer, agent,
+                event = await run_in_threadpool(lab.observe, run_id, session, peer, agent,
                                        dict(kind='research.input', method=request.method,
                                             resource=clean_text(resource)[:160], input=visitor_input))
+                if (background_mode and plan.get('origin') == 'ai'
+                        and model_event(event, plan)['what']['activity'] not in ('unknown', 'truncated')):
+                    queued = await run_in_threadpool(enqueue, lab, run_id, session)
                 if enabled and plan.get('origin') == 'ai':
                     from research.controller import adapt
                     from research.model import Model
@@ -217,7 +224,25 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                         outcome = await run_in_threadpool(adapt, lab, run_id, session, model, 1)
             policy_now = await run_in_threadpool(lab.policy, run_id, session)
             if resource == 'interact':
-                if request.method != 'POST':
+                if request.method == 'POST' and queued:
+                    status, body = 202, dict(status='queued', result=f'/decoy/{run_id}/interact')
+                elif request.method == 'GET' and background_mode:
+                    job_status = await run_in_threadpool(result_status, lab, run_id, session)
+                    if job_status == 'applied':
+                        current = await run_in_threadpool(lab.policy, run_id, session)
+                        if current.get('response_node'):
+                            status, body = await run_in_threadpool(
+                                lab.visit, run_id, 'scene/' + current['response_node'], session, peer, agent
+                            )
+                        else:
+                            status, body = 503, dict(error='当前查询暂无法完成')
+                    elif job_status == 'pending':
+                        status, body = 202, dict(status='pending')
+                    elif job_status == 'missing':
+                        status, body = 404, dict(error='未找到查询任务')
+                    else:
+                        status, body = 503, dict(error='当前查询暂无法完成')
+                elif request.method != 'POST':
                     status, body = 405, dict(error='请提交查询内容')
                 elif not outcome or outcome['status'] != 'applied' or not policy_now.get('response_node'):
                     status, body = 503, dict(error='当前查询暂无法完成')

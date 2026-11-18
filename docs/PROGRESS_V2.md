@@ -59,3 +59,12 @@
 - `pytest tests/test_document_publications.py` 实测访客入口没有管理接口、未授权无法创建、草稿不投放、故障回滚与自动重试、陈旧草稿拒绝、旧 Web 场景维持原版本和撤回后旧版本可读。
 - 当前覆盖合成知识库文档。通用对象或服务提案、各协议会话绑定、生产网络隔离和完整 P2–P5 整体验收仍有缺项。
 - 包含真实 Cowrie 的全量套件首轮遇到 Docker 启动超时，复跑 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 为 382 项通过、1 条既有弃用警告。确定性回放字节比对和部署脚本语法检查通过。
+
+
+### 模型运行预算和后台适配
+
+- SQLite 持久化每日 token 与价格额度预留。精确缓存隔离输入，返回结果使用拷贝并设 TTL；熔断和半开探测在控制进程执行。
+- 分离部署新增有界后台队列。同一 run 的同一会话请求合并；租约和修订号避免将处理中新增任务误删。控制面才调用模型。
+- `pytest tests/test_model_budget.py` 使用受控传输实测预算跨实例生效、超额不外呼、缓存不重复外呼、连续供应商故障触发熔断、冷却后恢复。HTTP 测试验证现有场景在预算拒绝时继续响应，已分类任务排队后可以返回处理结果。
+- 成本为预留估计。真实供应商故障演练、网络隔离、通用跨服务发布和其余新版整体验收仍有缺项。
+- 最新全量命令 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 为 385 项通过，含真实 Cowrie/OpenSSH 和 PyMySQL 路径；1 条既有依赖弃用警告。

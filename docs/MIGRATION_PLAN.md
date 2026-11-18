@@ -47,3 +47,10 @@ deploy/run-v2-local.sh cowrie
 
 
 在原子模式的 Dashboard 打开「数据发布」。可载入或新建 `/kb/*.md` 中的合成常规文档，保存后审批发布。发布 worker 由单写入 visitor 进程运行，成功提交后才显示已发布。基线文档在编辑期间发生变化时，旧草稿会被拒绝。可追加撤回版本，读取原来版本的 Web 和 SSH 会话保留其事实。该页面当前支持知识库文档，协议和服务级发布还需进一步接入。
+
+
+### 模型预算与后台适配
+
+模型默认每日允许预留 1,000,000 token，由共享 SQLite 账本 `RESEARCH_MODEL_BUDGET_FILE` 保存。未配置时，账本位于 `RESEARCH_STATE_FILE` 同目录。可设置 `RESEARCH_MODEL_DAILY_TOKENS`。费用上限通过 `RESEARCH_MODEL_DAILY_COST_MICROUSD` 配置，非零时需同时设置 `RESEARCH_MODEL_INPUT_MICROUSD_PER_MILLION` 和 `RESEARCH_MODEL_OUTPUT_MICROUSD_PER_MILLION`。成本按输入的保守估计与最大输出预留，避免依赖供应商返回计量；该估算不等同实际账单。UTC 日切换后使用新额度。
+
+控制面共享短时精确请求缓存与并发限制。供应商连续三次失败时进入 30 秒冷却，恢复时放行一个探测。将 `RESEARCH_ASYNC_ADAPTATION=1` 同时配置给 visitor 和 control 可启用后台适配。访客只对已分类活动提交有界任务，控制面处理队列。POST `/interact` 可返回 202，随后在同一 Cookie 会话 GET 同一路径。原有场景页面在排队或模型拒绝期间可继续访问。

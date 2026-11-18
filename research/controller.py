@@ -81,13 +81,14 @@ def _validate(choice, plan, snapshot):
     return decision, scene
 
 
-def adapt(lab, run, session, model, interval=3):
+def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
     with lab.connect() as db:
         plan = lab._plan(db, run)
         rows = [json.loads(r[0]) for r in db.execute('SELECT payload FROM events WHERE run=? ORDER BY id', (run,))]
         history = [json.loads(r[0]) for r in db.execute('SELECT payload FROM decisions WHERE run=? ORDER BY id', (run,))]
         events = [e for e in rows if e['session'] == session]
-        previous = next((d['observed'] for d in reversed(history) if d['session'] == session), 0)
+        previous = next((d['observed'] for d in reversed(history) if d['session'] == session
+                         and (d['status'] != 'pending' or not retry_pending)), 0)
         if len(events) - previous < interval or len(history) >= 20:
             return dict(status='not_due')
         old = db.execute('SELECT revision,payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
