@@ -40,7 +40,8 @@ def listener(app, env):
 
 
 def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_path):
-    common = dict(os.environ, BUSINESS_STATE_FILE=str(tmp_path / "world.json"),
+    common = dict(os.environ, BUSINESS_STATE_FILE=str(tmp_path / "world.sqlite"),
+                  HONEYNET_COWRIE_EXPORT=str(tmp_path / "ssh" / "world.sqlite"),
                   RESEARCH_STATE_FILE=str(tmp_path / "research.sqlite"),
                   HONEYNET_LATENCY_FILE=str(tmp_path / "http.sqlite"), HONEYNET_PG_DSN="")
     for name in ("RESEARCH_MODEL_API_KEY", "HONEYNET_CONTROL_TOKEN", "HONEYNET_DASHBOARD_PASSWORD"):

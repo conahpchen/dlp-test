@@ -89,7 +89,7 @@ def get_engine() -> Engine:
         candidate = Engine(World(enrich_seed(seed)))
         from business.storage import persist, restore
 
-        state = restore(candidate)
+        state = restore(candidate, recover=True)
         if state:
             _audit_rows[:] = state["audit"]
             _events[:] = state["events"]
@@ -116,15 +116,30 @@ def _audit(user: str, method: str, path: str, status: int) -> None:
         )
 
 
+def _checkpoint(engine):
+    from business.storage import location, persist, restore
+
+    try:
+        persist(engine, _audit_rows, _events)
+    except Exception:
+        path = location()
+        if path and path.suffix == ".sqlite":
+            state = restore(engine, recover=True)
+            if state is not None:
+                _audit_rows[:] = state["audit"]
+                _events[:] = state["events"]
+                _event_ids.clear()
+                _event_ids.update(row["event_id"] for row in _events)
+        raise
+
+
 def _emit(event: dict) -> None:
     """统一事件入管道（幂等）。"""
     with _lock:
         if event["event_id"] not in _event_ids:
             _event_ids.add(event["event_id"])
             _events.append(event)
-            from business.storage import persist
-
-            persist(get_engine(), _audit_rows, _events)
+            _checkpoint(get_engine())
 
 
 def _session_of(request: Request):
@@ -330,9 +345,7 @@ async def events_ingest(request: Request):
                 _events.append(ev)
                 added += 1
     with _lock:
-        from business.storage import persist
-
-        persist(get_engine(), _audit_rows, _events)
+        _checkpoint(get_engine())
     return {"ingested": added, "total": len(_events)}
 
 
@@ -355,9 +368,7 @@ def v1_models(request: Request):
     with _lock:
         models = bind_model_list(engine, session, key_hash)
         if session in engine.world.sessions:
-            from business.storage import persist
-
-            persist(engine, _audit_rows, _events)
+            _checkpoint(engine)
     return {
         "object": "list",
         "data": [

@@ -11,7 +11,7 @@ from replay.engine import Engine
 
 
 def test_mysql_client_auth_read_only_and_version_freeze(demo_seed, tmp_path, monkeypatch):
-    checkpoint = tmp_path / "world.json"
+    checkpoint = tmp_path / "world.sqlite"
     monkeypatch.setenv("BUSINESS_STATE_FILE", str(checkpoint))
     engine = Engine(World(enrich_seed(demo_seed)))
     persist(engine, [], [])

@@ -4,6 +4,7 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+from business.atomic_state import commit, read
 from dws.facts import Fact
 from dws.hlc import HLC
 from dws.world import Session
@@ -20,11 +21,13 @@ def location():
     return Path(__file__).resolve().parents[1] / "var" / "business-state.json"
 
 
-def restore(engine):
+def restore(engine, *, recover=False):
     path = location()
     if not path or not path.exists():
         return None
-    state = json.loads(path.read_text())
+    state = read(path, recover=recover)
+    if state is None:
+        return None
     if state["schema"] not in (1, 2):
         raise ValueError("Unsupported business checkpoint schema")
     engine.world.meta = state["meta"]
@@ -70,6 +73,17 @@ def persist(engine, audit, events):
         audit=audit,
         events=events,
     )
+    if path.suffix == ".sqlite":
+        snapshot = None
+        if projection:
+            from entries.cowrie.projection import prepare
+
+            snapshot = prepare(engine.world, os.environ.get("HONEYNET_COWRIE_HOST", "web01"))
+        commit(path, state, projection, snapshot)
+        return
+    if projection and Path(projection).suffix == ".sqlite":
+        raise ValueError("A SQLite SSH projection requires a SQLite checkpoint")
+
     tmp = path.with_suffix(".tmp")
     with tmp.open("w") as out:
         json.dump(state, out, ensure_ascii=False)

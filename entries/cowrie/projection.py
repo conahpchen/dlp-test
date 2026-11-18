@@ -11,7 +11,7 @@ from dws.ids import entity_uuid
 from generation.templates import GroundedTemplates
 
 
-def publish(world, destination, hostname):
+def prepare(world, hostname):
     version = world.meta["world_version"]
     view = world.view(version)
     host_id = entity_uuid("host", hostname)
@@ -36,12 +36,19 @@ def publish(world, destination, hostname):
     for path in ("/etc/hostname", "/etc/hosts", "/etc/passwd", "/etc/os-release"):
         files[path] = dict(kind="file", uid=0, deleted=False,
                            content=templates._system_file(view, session, path) + "\n")
+    return dict(schema=1, world_version=version, hostname=hostname, files=files)
+
+
+def publish(world, destination, hostname):
+    snapshot = prepare(world, hostname)
     destination = Path(destination)
+    if destination.suffix == ".sqlite":
+        raise ValueError("SQLite projections must be written with their DWS checkpoint")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent, delete=False) as stream:
         temporary = Path(stream.name)
         try:
-            json.dump(dict(schema=1, world_version=version, hostname=hostname, files=files), stream)
+            json.dump(snapshot, stream)
             stream.flush()
             os.fsync(stream.fileno())
             temporary.chmod(0o644)
@@ -52,7 +59,7 @@ def publish(world, destination, hostname):
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return version
+    return snapshot["world_version"]
 
 
 if __name__ == "__main__":

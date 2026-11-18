@@ -1,6 +1,6 @@
 # 动态蜜网 v2.1 架构
 
-DWS 持有合成主机、身份、数据、服务及业务对象事实。启动种子引入初始事实，发布应通过 DWS CAS 提交。单写入者在本地原子替换 JSON checkpoint。读取方可读取其中一个完整版本。Research SQLite 保存投放计划、观测和审核记录，现有 HTTP 场景正文仍保存在 Research 投影中。
+DWS 持有合成主机、身份、数据、服务及业务对象事实。启动种子引入初始事实，发布应通过 DWS CAS 提交。单写入者支持本地 JSON checkpoint，以及 SQLite 双库事务模式。SQLite 模式将私有 checkpoint 与终端安全投影同时提交。本地读取方通过各自的数据库读取已提交版本。Research SQLite 保存投放计划、观测和审核记录，现有 HTTP 场景正文仍保存在 Research 投影中。
 
 ## 协议与会话契约
 

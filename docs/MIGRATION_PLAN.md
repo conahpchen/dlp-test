@@ -37,3 +37,10 @@ deploy/run-v2-local.sh cowrie
 ```
 
 已有的 visitor 单写进程可以在相同环境下启动，使它在 checkpoint 更新后原子替换专用投影文件。容器只需挂载该专用目录，文件路径与 checkpoint 分离。现存终端继续使用加载的投影；新终端载入替换后的文件。如果投影导出失败，旧的有效投影文件仍可读取，可通过上面的导出命令从 checkpoint 修复。checkpoint 与各协议投影之间的统一发布事务仍待建设。
+
+
+### 本地原子 DWS 发布模式
+
+新实例在启动所有入口前设置 `HONEYNET_DWS_ATOMIC=1`，将 `HONEYNET_COWRIE_EXPORT` 指向专用目录中的 `world.sqlite`，目录权限须允许 Cowrie 容器的 UID 999 读取。保留 checkpoint 目录的私有权限。两目录必须位于同一台主机的同一文件系统。依次启动 visitor 并访问其 `/v1/models` 初始化已提交快照，再启动 control、dashboard、mysql 和 cowrie。SQLite 模式直接初始化 Cowrie 导出，省掉上面手工 JSON 导出步骤。
+
+老 JSON 实例照常读取。使用单独的状态目录可以演练 SQLite 模式。SQLite 事务覆盖本机 DWS checkpoint 和 Cowrie 投影。Web 场景活动状态、外部服务启停和跨协议会话关联仍是独立状态。

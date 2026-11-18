@@ -1,7 +1,6 @@
 """Opt-in real SSH verification of version-pinned Cowrie files."""
 
 import copy
-import json
 import os
 import select
 import shutil
@@ -13,6 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from business.atomic_state import read
 from business.storage import persist
 from entries.gateway import app as gateway
 from dws.world import World
@@ -23,8 +23,8 @@ from replay.engine import Engine
 def test_real_cowrie_keeps_old_dws_projection(demo_seed, tmp_path, monkeypatch):
     engine = Engine(World(demo_seed))
     directory = tmp_path / "projection"
-    projection = directory / "world.json"
-    monkeypatch.setenv("BUSINESS_STATE_FILE", str(tmp_path / "private" / "world.json"))
+    projection = directory / "world.sqlite"
+    monkeypatch.setenv("BUSINESS_STATE_FILE", str(tmp_path / "private" / "world.sqlite"))
     monkeypatch.setenv("HONEYNET_COWRIE_EXPORT", str(projection))
     monkeypatch.setenv("HONEYNET_COWRIE_HOST", "web01")
     monkeypatch.setattr(gateway, "_engine", engine)
@@ -32,7 +32,7 @@ def test_real_cowrie_keeps_old_dws_projection(demo_seed, tmp_path, monkeypatch):
     headers = {"Authorization": "Bearer sk-demo-internal-2026", "X-Session": "before-publication"}
     assert api.get("/v1/models", headers=headers).json()["data"][0]["id"] == "corp-llm-7b"
     persist(engine, [], [])
-    snapshot = json.loads(projection.read_text())
+    snapshot = read(projection)
     assert set(snapshot) == {"schema", "world_version", "hostname", "files"}
     assert snapshot["world_version"] == engine.world.meta["world_version"]
     directory.chmod(0o755)
@@ -49,7 +49,7 @@ def test_real_cowrie_keeps_old_dws_projection(demo_seed, tmp_path, monkeypatch):
     askpass.chmod(0o700)
     container = subprocess.check_output([
         "docker", "run", "-d", "-p", "127.0.0.1::2222",
-        "-e", "HONEYNET_COWRIE_PROJECTION=/projection/world.json",
+        "-e", "HONEYNET_COWRIE_PROJECTION=/projection/world.sqlite",
         "-e", "COWRIE_HONEYPOT_HOSTNAME=web01",
         "--mount", f"type=bind,source={hook},target=/dws-hook,readonly",
         "--mount", f"type=bind,source={directory},target=/projection,readonly",

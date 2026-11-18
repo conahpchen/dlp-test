@@ -44,3 +44,10 @@
 - 实际 OpenSSH 连接验证了旧终端保持旧文件内容、新终端读取新文件与 DWS 主机地址，以及会话内 `touch` 结果对新会话不可见。同一 DWS 提交改变假 AI 的模型清单，旧会话与新请求分别看到旧值和新值。
 - `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 共 378 项通过，1 条既有依赖弃用警告。`docker build -f deploy/Dockerfile.cowrie-dws -t dlp-cowrie-dws:local .` 和 `sh -n deploy/run-v2-local.sh` 均通过。
 - 实际覆盖合成文件、目录和指定系统文件。完整权限语义、SSH 握手与其他协议之间的统一绑定仍待完成。各投影的原子共享激活、新方案的生产隔离、完整管理端和其他 P2–P5 条件仍未通过整体验收。
+
+### DWS 与 Cowrie 本地原子发布
+
+- 新增同一文件系统的 SQLite 双库事务。DWS 私有 checkpoint 和 Cowrie 只读合成投影使用回滚日志，在同一个事务提交。JSON 实例保留兼容路径。
+- 故障注入覆盖两边已写入但未提交时抛出异常、退出写入进程，以及假 AI 请求写入失败后恢复内存事件状态。读取保持在旧版本，后续重试可提交。
+- 真实 Cowrie 固定版本测试、本机多监听器测试、MySQL 只读目录客户端测试均切换到 SQLite 路径。重建 Cowrie 镜像和 `sh -n deploy/run-v2-local.sh` 通过。
+- 完整测试命令为 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q`。结果为 381 项通过、1 条既有弃用警告。新版整体验收仍有缺项。该事务范围为本机 checkpoint 和 Cowrie 投影，通用 Proposal、Web 激活、网络隔离及外部服务编排仍需验收。

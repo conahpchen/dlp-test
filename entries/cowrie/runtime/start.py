@@ -3,8 +3,21 @@
 import json
 import os
 import runpy
+import sqlite3
+from contextlib import closing
 import sys
 from pathlib import Path
+
+
+def read_projection(projection):
+    path = Path(projection)
+    if path.suffix != ".sqlite":
+        return json.loads(path.read_text(encoding="utf-8"))
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        row = db.execute("SELECT payload FROM active_snapshot WHERE id=1").fetchone()
+        if row is None:
+            raise ValueError("No committed DWS projection")
+        return json.loads(row[0])
 
 
 def install(projection):
@@ -22,7 +35,7 @@ def install(projection):
             raise ValueError("Invalid projected directory")
 
     def initialize_with_dws(filesystem, *args, **kwargs):
-        snapshot = json.loads(Path(projection).read_text(encoding="utf-8"))
+        snapshot = read_projection(projection)
         if snapshot["schema"] != 1 or snapshot["hostname"] != os.environ["COWRIE_HONEYPOT_HOSTNAME"]:
             raise ValueError("Cowrie hostname and DWS projection must agree")
         initialize(filesystem, *args, **kwargs)

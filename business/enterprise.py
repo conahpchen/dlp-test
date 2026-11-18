@@ -411,9 +411,6 @@ def register(app):
                 e, s["username"], s["cred_hash"], path, data.get("ticket", key)
             )
         )
-        from business.storage import persist
-
-        persist(e, b._audit_rows, b._events)
         return dict(key=key, ticket_id=key, **data)
 
     def listing(r, kind):

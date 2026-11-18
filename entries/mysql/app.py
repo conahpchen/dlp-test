@@ -1,7 +1,6 @@
 """Loopback MySQL protocol projection of a DWS checkpoint."""
 
 import asyncio
-import json
 import os
 import re
 from contextlib import aclosing
@@ -12,6 +11,7 @@ from mysql_mimic import MysqlServer, Session
 from mysql_mimic.auth import Forbidden, IdentityProvider, NativePasswordAuthPlugin, Success, User
 from mysql_mimic.errors import MysqlError
 
+from business.atomic_state import read
 from business.storage import location
 from dws.ids import entity_uuid, ulid_now
 from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX
@@ -75,7 +75,7 @@ class CatalogCredentials(IdentityProvider):
 class CatalogSession(Session):
     def __init__(self, checkpoint):
         super().__init__()
-        state = json.loads(checkpoint.read_text())
+        state = read(checkpoint)
         self.world_version = state["meta"]["world_version"]
         facts = state["facts"]
         host = facts["host"].get(entity_uuid("host", HOST))

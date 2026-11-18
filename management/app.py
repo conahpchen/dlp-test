@@ -1,7 +1,6 @@
 """Dashboard and template editor on their own authenticated listener."""
 
 import html
-import json
 import math
 import os
 import secrets
@@ -15,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from audit.http_latency import samples
+from business.atomic_state import read
 from business.storage import location
 from management.templates import template_router
 
@@ -56,7 +56,7 @@ def research_metrics():
 
 def runtime():
     checkpoint = location()
-    state = json.loads(checkpoint.read_text()) if checkpoint and Path(checkpoint).is_file() else {}
+    state = read(checkpoint) if checkpoint and Path(checkpoint).is_file() else {}
     events = state.get("events", [])
     durations = sorted(duration for _, duration in samples())
     hosts = [rows[-1]["payload"] for rows in state.get("facts", {}).get("host", {}).values()]
