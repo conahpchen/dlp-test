@@ -1,4 +1,4 @@
-"""Visitor input must reach the model and change real HTTP responses, without execution."""
+"""Only classified visitor activity reaches the model and changes HTTP responses."""
 import copy
 import json
 
@@ -20,14 +20,14 @@ class InputModel(SceneModel):
         self.calls.append(copy.deepcopy(messages))
         context=json.loads(messages[-1]['content'])
         event=context['events'][-1]
-        value=event['what'].get('input',{})
+        value={key: event['what'][key] for key in ('activity', 'component') if key in event['what']}
         node=copy.deepcopy(context['current_scene']['nodes'][1])
         node['body']='本次查询的合成业务记录：'+json.dumps(value,ensure_ascii=False)
         services=[]
         if event['what']['resource'].startswith('service/'):
             path=event['what']['resource'].removeprefix('service/')
             node['body'] += ' 关联接口 /service/'+path
-            services=[dict(id=event['what']['method'].lower()+'-'+path.replace('/','-'),method=event['what']['method'],path=path,node_id=node['id'],data={'query':value.get('query'),'body':value.get('body'),'status':'recorded'})]
+            services=[dict(id=event['what']['method'].lower()+'-'+path.replace('/','-'),method=event['what']['method'],path=path,node_id=node['id'],data=dict(value,status='recorded'))]
         return dict(actor_hypothesis='unknown',action='reveal_clue',document_id=context['documents'][0]['id'],
                     reason='Respond to the actual visitor query',evidence_event_ids=[event['event_id']],
                     scene_patch={'nodes':[node],'services':services},response_node=node['id'],
@@ -59,7 +59,7 @@ def test_two_inputs_generate_two_distinct_replies(setup):
     first=client.post(root+'/interact',json={'message':'查找部署回滚说明'})
     second=client.post(root+'/interact',json={'message':'继续查询数据库备份记录'})
     assert first.status_code==second.status_code==200
-    assert '部署回滚' in first.json()['content'] and '数据库备份' in second.json()['content']
+    assert 'deployment_rollback' in first.json()['content'] and 'database_backup' in second.json()['content']
     assert first.json()['content']!=second.json()['content']
     report=client.get('/api/research/runs/'+scenario['run_id'],headers=headers).json()
     assert report['engagement']['input_turns_responded']==2
@@ -71,16 +71,16 @@ def test_query_creates_real_simulated_service_and_post_updates_data(setup):
     root=scenario['entry'].rsplit('/',1)[0]
     first=client.get(root+'/service/config',params={'component':'database','token':'visitor-secret'})
     assert first.status_code==200
-    assert first.json()['data']['query']=={'component':'database','token':'[redacted]'}
+    assert first.json()['data']=={'activity':'component_lookup','component':'database','status':'recorded'}
     post=client.post(root+'/service/config',json={'component':'cache','command':'cat /etc/passwd'})
     assert post.status_code==200
     assert root+'/service/config' in post.json()['content']
-    assert post.json()['data']['body']['component']=='cache'
-    assert post.json()['data']['body']['command']=='cat /etc/passwd'
+    assert post.json()['data']['component']=='cache'
+    assert 'cat /etc/passwd' not in str(model.calls)
     session=client.cookies.get('research_session')
     lab=current_lab()
     restored=ResearchLab(lab.path)
-    assert restored.visit(scenario['run_id'],'service/config',session,'127.0.0.1','browser','POST')[1]['data']['body']['component']=='cache'
+    assert restored.visit(scenario['run_id'],'service/config',session,'127.0.0.1','browser','POST')[1]['data']['component']=='cache'
     assert restored.visit(scenario['run_id'],'service/config','other-session','127.0.0.1','browser','POST')[0]==404
     report=client.get('/api/research/runs/'+scenario['run_id'],headers=headers).json()
     assert 'visitor-secret' not in json.dumps(report)
@@ -91,9 +91,9 @@ def test_form_and_text_inputs_and_secret_redaction(setup):
     client,scenario,model,headers=setup
     root=scenario['entry'].rsplit('/',1)[0]
     form=client.post(root+'/interact',data={'message':'继续查询工单','password':'do-not-store'})
-    assert form.status_code==200 and '继续查询工单' in form.json()['content']
+    assert form.status_code==200 and 'ticket_lookup' in form.json()['content']
     text=client.post(root+'/interact',content='查看变更记录 password=do-not-store',headers={'content-type':'text/plain'})
-    assert text.status_code==200 and '查看变更记录' in text.json()['content']
+    assert text.status_code==200 and 'change_lookup' in text.json()['content']
     assert 'do-not-store' not in str(model.calls)
     page=client.get(scenario['entry'],headers={'accept':'text/html'})
     assert '<form' in page.text and root+'/interact' in page.text
@@ -130,3 +130,15 @@ def test_service_paths_and_source_references_are_constrained(setup):
     for path in ('../api/research','/api/research','config?token=x','config//other'):
         with pytest.raises(ValueError):
             merge_scene_patch(plan['scene'],{'nodes':[node],'services':[dict(id='test',method='GET',path=path,node_id=node['id'],data={})]},plan['documents'])
+
+
+def test_unknown_payload_keys_paths_and_text_never_reach_model(setup):
+    client, scenario, model, _ = setup
+    root = scenario['entry'].rsplit('/', 1)[0]
+    marker = 'UnrecognizablePrivateMaterial'
+    client.post(root + '/service/' + marker, json={marker: marker, 'message': marker})
+    assert marker not in str(model.calls)
+    context = next(json.loads(call[-1]['content']) for call in reversed(model.calls)
+                   if 'interaction and lure author' in call[0]['content'])
+    assert context['events'][-1]['what']['resource'] == 'unknown'
+    assert context['events'][-1]['what']['activity'] == 'unknown'

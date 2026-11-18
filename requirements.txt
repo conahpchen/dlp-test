@@ -17,3 +17,7 @@ psycopg[binary]>=3.1
 pytest>=8.0
 httpx>=0.25          # starlette TestClient 依赖（网关测试）
 
+
+# Loopback read-only MySQL emulation and client acceptance test
+mysql-mimic==3.0.5
+PyMySQL==1.2.4

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import threading
 from pathlib import Path
@@ -21,6 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from dws.ids import ulid_now
 from dws.world import CommitRejected, World
+from entries.gateway.session import bind_model_list, credentials
 from generation.llm_templates import classify_message
 from judgment import L1RulesJudge
 from replay.engine import Engine
@@ -85,13 +87,15 @@ def get_engine() -> Engine:
         from business.enterprise import enrich_seed
 
         candidate = Engine(World(enrich_seed(seed)))
-        from business.storage import restore
+        from business.storage import persist, restore
 
         state = restore(candidate)
         if state:
             _audit_rows[:] = state["audit"]
             _events[:] = state["events"]
             _event_ids.update(e["event_id"] for e in _events)
+        if state is None:
+            persist(candidate, _audit_rows, _events)
         _engine = candidate
         return _engine
 
@@ -128,14 +132,6 @@ def _session_of(request: Request):
     token = auth[7:] if auth.startswith("Bearer ") else ""
     return _sessions.get(token)
 
-
-def _world_models(engine: Engine) -> list[str]:
-    models = []
-    for f in engine.world.all_current_cls("host"):
-        for s in f.payload.get("services", []):
-            if s.get("proto") == "openai" and s.get("ver"):
-                models.append(s["ver"])
-    return sorted(set(models))
 
 
 def _biz_event(
@@ -353,24 +349,23 @@ def events_view(request: Request):
 
 
 @app.get("/v1/models")
-def v1_models():
+def v1_models(request: Request):
     engine = get_engine()
+    key_hash, session = credentials(request)
+    with _lock:
+        models = bind_model_list(engine, session, key_hash)
+        if session in engine.world.sessions:
+            from business.storage import persist
+
+            persist(engine, _audit_rows, _events)
     return {
         "object": "list",
         "data": [
             {"id": m, "object": "model", "owned_by": "corp"}
-            for m in _world_models(engine)
+            for m in models
         ],
     }
 
-
-def _world_models(engine: Engine) -> list[str]:
-    models = []
-    for f in engine.world.all_current_cls("host"):
-        for s in f.payload.get("services", []):
-            if s.get("proto") == "openai" and s.get("ver"):
-                models.append(s["ver"])
-    return sorted(set(models))
 
 
 @app.post("/v1/chat/completions")
@@ -389,12 +384,17 @@ async def v1_chat(request: Request):
             },
             400,
         )
-    auth = request.headers.get("authorization") or ""
-    key = auth[7:] if auth.startswith("Bearer ") else ""
-    cred_hash = _sha(key) if key else None
+    cred_hash, session = credentials(request)
+    authorization = request.headers.get("authorization", "")
+    bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{32}", bearer):
+        from research.api import current_lab
+        from starlette.concurrency import run_in_threadpool
+
+        await run_in_threadpool(current_lab().observe_lure_use, bearer, "llm", session)
 
     model = body.get("model") or ""
-    if model not in _world_models(engine):
+    if model not in engine.llm_models(session):
         return JSONResponse(
             {
                 "error": {
@@ -406,14 +406,12 @@ async def v1_chat(request: Request):
             404,
         )
 
-    match = engine._match_llm_credential(cred_hash)
     messages = body.get("messages") or []
     last_user = next(
         (m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"),
         "",
     )
     target_class = classify_message(last_user, engine.judge.rules)
-    session = request.headers.get("x-session") or f"oa-{(cred_hash or 'anon')[:12]}"
     client_ip = request.client.host if request.client else "0.0.0.0"
     parts = client_ip.split(".")
     if len(parts) == 4:
@@ -449,7 +447,7 @@ async def v1_chat(request: Request):
         "auth_failures": engine.auth_fails.get(
             engine.identity.observe(ip24=client_ip, cred_hash=cred_hash), 0
         ),
-        "valid_key": engine.check_llm_key(cred_hash),
+        "valid_key": engine.check_llm_key(cred_hash, session),
         "target_class": target_class,
     }
     event["verdict"] = engine.judge.judge_safe(event, ctx)
@@ -518,4 +516,9 @@ def _research_events_snapshot():
         return list(_events)
 
 
-_install_research_routes(app, get_engine, _research_events_snapshot)
+_install_research_routes(app, get_engine, _research_events_snapshot,
+                         surface='visitor' if os.environ.get('HONEYNET_VISITOR_ONLY') == '1' else 'integrated')
+
+from audit.http_latency import install as _install_http_latency
+
+_install_http_latency(app)

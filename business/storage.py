@@ -1,10 +1,12 @@
 """Atomic local checkpoint preserving every DWS fact version; single worker only."""
 
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 from dws.facts import Fact
 from dws.hlc import HLC
+from dws.world import Session
 
 
 def location():
@@ -23,12 +25,17 @@ def restore(engine):
     if not path or not path.exists():
         return None
     state = json.loads(path.read_text())
-    if state["schema"] != 1:
+    if state["schema"] not in (1, 2):
         raise ValueError("Unsupported business checkpoint schema")
     engine.world.meta = state["meta"]
     engine.world.facts = {
         cls: {eid: [Fact(**f) for f in rows] for eid, rows in entities.items()}
         for cls, entities in state["facts"].items()
+    }
+    engine.world.sessions = {
+        key: Session(**dict(row, own_versions=set(row["own_versions"]),
+                            new_entities={tuple(item) for item in row["new_entities"]}))
+        for key, row in state.get("sessions", {}).items()
     }
     engine.biz_seq = state["biz_seq"]
     clock = HLC.parse(engine.world.meta["now_hlc"])
@@ -43,7 +50,12 @@ def persist(engine, audit, events):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     state = dict(
-        schema=1,
+        schema=2,
+        sessions={
+            key: dict(asdict(session), own_versions=sorted(session.own_versions),
+                      new_entities=sorted(session.new_entities))
+            for key, session in engine.world.sessions.items()
+        },
         meta=engine.world.meta,
         biz_seq=engine.biz_seq,
         facts={

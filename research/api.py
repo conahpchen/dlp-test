@@ -9,6 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.background import BackgroundTask
 
 from research.lab import ResearchLab
 
@@ -41,7 +42,7 @@ class RunSpec(BaseModel):
     variant: Literal['plain', 'agent_note'] = 'plain'
 
 
-def install_routes(app, engine_provider, event_provider=lambda: []):
+def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='integrated'):
     control_api = APIRouter(prefix='/api/research', dependencies=[Depends(control)])
 
     @control_api.get('/status')
@@ -85,6 +86,13 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @control_api.post('/runs/{run_id}/rollback')
+    def rollback(run_id: str):
+        try:
+            return current_lab().rollback(run_id)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(409, 'Release cannot be rolled back') from exc
+
     @control_api.delete('/active')
     def deactivate():
         current_lab().deactivate()
@@ -116,10 +124,13 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
         return dict(profiles=analyze(event_provider()),
                     interpretation='Session-level hypotheses; no automatic identity merge or proof of actor type.')
 
-    app.include_router(control_api)
+    if surface != 'visitor':
+        app.include_router(control_api)
+    if surface == 'control':
+        return
     from research.observer import install_observer
 
-    install_observer(app, current_lab)
+    install_observer(app, current_lab, allow_model=surface == 'integrated')
 
     @app.api_route('/decoy/{run_id}/{resource:path}', methods=['GET', 'POST'])
     async def decoy(run_id: str, resource: str, request: Request):
@@ -137,7 +148,8 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
             visitor_input = await capture(request)
             is_input = (request.method == 'POST' or bool(visitor_input['query'])
                         or resource.startswith('service/'))
-            enabled = os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1' if plan.get('origin') == 'ai' else '0') == '1'
+            enabled = (surface == 'integrated' and os.environ.get(
+                'RESEARCH_ADAPTIVE_ENABLED', '1' if plan.get('origin') == 'ai' else '0') == '1')
             outcome = None
             if is_input:
                 await run_in_threadpool(lab.observe, run_id, session, peer, agent,
@@ -182,7 +194,11 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
         if scene:
             ids = {node['id'] for node in scene['nodes']}
             lead = next((node for node in policy.get('expected_next_nodes', []) if node in ids), None)
-        response = JSONResponse(body, status_code=status,
+        lure_link = body.get('verification_link')
+        receipt = None
+        if status == 200 and lure_link:
+            receipt = BackgroundTask(lab.record_lure_response, run_id, session, lure_link.rsplit('/', 1)[-1])
+        response = JSONResponse(body, status_code=status, background=receipt,
                                 headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
         if lead:
             response.headers['Link'] = f'</decoy/{run_id}/scene/{lead}>; rel="related"'
@@ -198,6 +214,7 @@ def install_routes(app, engine_provider, event_provider=lambda: []):
             from research.render import html_response
 
             rendered = html_response(body)
+            rendered.background = receipt
             for key in ('set-cookie', 'cache-control', 'referrer-policy', 'link'):
                 if key in response.headers:
                     rendered.headers[key] = response.headers[key]

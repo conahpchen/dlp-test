@@ -24,6 +24,7 @@ from fastapi import FastAPI, Request
 from dws import loader_sql
 from dws.ids import ulid_now
 from dws.world import World
+from entries.gateway.session import bind_model_list, credentials
 from generation.llm_templates import classify_message
 from judgment import L1RulesJudge
 from replay.engine import Engine
@@ -68,20 +69,9 @@ def _error(status: int, message: str, err_type: str, code: str | None = None) ->
     return {"error": {"message": message, "type": err_type, "code": code}}
 
 
-def respond(payload: dict, status: int = 200, xd: dict | None = None):
-    """JSON 响应辅助：x-deception 审计字段随响应头走（含引用 fact_id / 诱饵标记 / 世界版本）。"""
+def respond(payload: dict, status: int = 200):
     from fastapi.responses import JSONResponse
-    headers = {"x-deception": json.dumps(xd, ensure_ascii=False)} if xd else None
-    return JSONResponse(content=payload, status_code=status, headers=headers)
-
-
-def _world_models(engine: Engine) -> list[str]:
-    models = []
-    for f in engine.world.all_current_cls("host"):
-        for s in f.payload.get("services", []):
-            if s.get("proto") == "openai" and s.get("ver"):
-                models.append(s["ver"])
-    return sorted(set(models))
+    return JSONResponse(content=payload, status_code=status)
 
 
 def _build_llm_event(engine: Engine, key_hash: str, body: dict, client_ip: str,
@@ -125,11 +115,13 @@ def healthz():
 
 
 @app.get("/v1/models")
-def list_models():
+def list_models(request: Request):
     engine = get_engine()
+    key_hash, session = credentials(request)
+    with _lock:
+        models = bind_model_list(engine, session, key_hash)
     return {"object": "list",
-            "data": [{"id": m, "object": "model", "owned_by": "corp"} for m in _world_models(engine)]}
-
+            "data": [{"id": m, "object": "model", "owned_by": "corp"} for m in models]}
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
@@ -139,11 +131,8 @@ async def chat_completions(request: Request):
     except Exception:  # noqa: BLE001
         return respond(_error(400, "Invalid JSON body", "invalid_request_error"), 400)
 
-    auth = request.headers.get("authorization") or ""
-    key = auth[7:] if auth.startswith("Bearer ") else ""
-    key_hash = _sha(key) if key else None
-
-    models = _world_models(engine)
+    key_hash, session = credentials(request)
+    models = engine.llm_models(session)
     model = body.get("model") or ""
     if model not in models:
         return respond(_error(404, f"The model `{model or '(empty)'}` does not exist",
@@ -153,17 +142,17 @@ async def chat_completions(request: Request):
     last_user = next((m.get("content") or "" for m in reversed(messages)
                       if m.get("role") == "user"), "")
     target_class = classify_message(last_user, engine.judge.rules)
-    session = request.headers.get("x-session") or f"gw-{(key_hash or 'anon')[:12]}"
     client_ip = request.client.host if request.client else "0.0.0.0"
     # /24 截断（合规 T6）
     parts = client_ip.split(".")
     if len(parts) == 4:
         client_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
 
-    valid_key = engine.check_llm_key(key_hash)
-    event = _build_llm_event(engine, key_hash, body, client_ip, session,
-                             target_class, valid_key)
-    resp = engine.process(event)
+    with _lock:
+        valid_key = engine.check_llm_key(key_hash, session)
+        event = _build_llm_event(engine, key_hash, body, client_ip, session,
+                                 target_class, valid_key)
+        resp = engine.process(event)
 
     # 事件落库（PG 可用即落；不可用只影响持久化，不影响响应）
     dsn = os.environ.get("HONEYNET_PG_DSN")
@@ -181,9 +170,6 @@ async def chat_completions(request: Request):
 
     chat = resp["chat"]
     prompt_tokens = sum(len(str(m.get("content") or "")) // 4 + 1 for m in messages)
-    xd = {"citations": chat["citations"], "decoy": chat["decoy"],
-          "budget": chat["budget"], "by": chat["verdict_by"],
-          "dws_version": resp["dws_version"], "attacker_id": resp["attacker_id"]}
     return respond({
         "id": f"chatcmpl-{resp['event_id']}",
         "object": "chat.completion",
@@ -195,7 +181,7 @@ async def chat_completions(request: Request):
         "usage": {"prompt_tokens": prompt_tokens,
                   "completion_tokens": chat["tokens"],
                   "total_tokens": prompt_tokens + chat["tokens"]},
-    }, 200, xd)
+    })
 
 
 if __name__ == "__main__":

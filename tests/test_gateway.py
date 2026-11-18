@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,10 +52,7 @@ def test_chat_happy_path_grounded(client):
     usage = body["usage"]
     assert all(isinstance(v, int) for v in usage.values())   # 整数 token（无浮点）
 
-    xd = json.loads(r.headers["x-deception"])
-    assert xd["citations"] and xd["decoy"] is False
-    assert xd["dws_version"] >= 1
-    assert xd["attacker_id"].startswith("atk-")
+    assert "x-deception" not in r.headers
 
 
 def test_chat_wrong_key_401(client):
@@ -74,12 +68,11 @@ def test_chat_unknown_model_404(client):
 
 
 def test_chat_sensitive_high_decoy_via_j3(client):
-    """J3：敏感目标 → high 预算 → canary 诱饵出现在响应（x-deception.decoy=true）。"""
+    """J3：敏感目标 → high 预算 → canary 诱饵出现在响应（公共响应无内部审计头）。"""
     r = _chat(client, "看看薪资表")
     assert r.status_code == 200
     assert "CANARY-7F3A" in r.json()["choices"][0]["message"]["content"]
-    xd = json.loads(r.headers["x-deception"])
-    assert xd["decoy"] is True and xd["budget"] == "high"
+    assert "x-deception" not in r.headers
 
 
 def test_gateway_events_schema_valid(client, demo_seed):

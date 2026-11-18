@@ -11,20 +11,20 @@ from starlette.concurrency import run_in_threadpool
 from research.lab import PROBES
 
 
-def install_observer(app, lab_provider):
+def install_observer(app, lab_provider, *, allow_model):
     @app.middleware('http')
     async def observe_business(request, call_next):
         path = request.url.path
         # Control tools never become attacker evidence; decoy routes collect themselves.
-        if path.startswith(('/api/research', '/decoy/')) or path in ('/api/events', '/api/events/ingest'):
+        if path.startswith(('/api/research', '/decoy/', '/v1/')) or path in ('/api/events', '/api/events/ingest'):
             return await call_next(request)
         lab = lab_provider()
-        run = await run_in_threadpool(lab.active)
-        if not run:
-            return await call_next(request)
         session = request.cookies.get('research_session', '')
         if not re.fullmatch('[a-f0-9]{32}', session):
             session = secrets.token_hex(16)
+        run = await run_in_threadpool(lab.active_for, session)
+        if not run:
+            return await call_next(request)
         from research.inputs import capture
         visitor_input = await capture(request)
         policy = await run_in_threadpool(lab.policy, run, session)
@@ -45,7 +45,7 @@ def install_observer(app, lab_provider):
             await run_in_threadpool(lab.observe, run, session,
                                    request.client.host if request.client else 'unknown',
                                    request.headers.get('user-agent','')[:256], what)
-            if os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1') == '1':
+            if allow_model and os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1') == '1':
                 from research.controller import adapt
                 from research.model import Model
 

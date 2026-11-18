@@ -23,7 +23,20 @@ class ResearchLab:
         with self.connect() as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, plan TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS visitor_runs (
+                session TEXT PRIMARY KEY, run TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS release_history (
+                id INTEGER PRIMARY KEY, previous_run TEXT, next_run TEXT, action TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS lure_tokens (
+                run TEXT NOT NULL, session TEXT NOT NULL, resource TEXT NOT NULL,
+                token TEXT NOT NULL UNIQUE, PRIMARY KEY(run,session,resource));
+            CREATE TABLE IF NOT EXISTS lure_uses (
+                id INTEGER PRIMARY KEY, token_hash TEXT NOT NULL, entry TEXT NOT NULL,
+                session TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(token_hash,entry,session));
+            CREATE TABLE IF NOT EXISTS lure_response_receipts (
+                token_hash TEXT PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS exposures (
                 token TEXT PRIMARY KEY, run TEXT NOT NULL, session TEXT NOT NULL,
                 fact TEXT NOT NULL, delivered TEXT NOT NULL);
@@ -79,17 +92,58 @@ class ResearchLab:
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
 
     def activate(self, run):
+        from research.generation import validate_scene
+
         with self.connect() as db:
             plan = self._plan(db, run)
             if plan.get('origin') != 'ai':
                 raise ValueError('Only model-generated scenes can be activated')
-            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
+            validate_scene(plan['scene'], plan['documents'])
+            previous = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if not previous or previous[0] != run:
+                db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
+                           (previous[0] if previous else None, run, 'activate'))
+                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
         return dict(active_run=run, entry=f'/decoy/{run}/index')
+
+    def rollback(self, run):
+        """Restore the predecessor of the current release in one transaction."""
+        with self.connect() as db:
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if not active or active[0] != run:
+                raise ValueError('Release is no longer active')
+            predecessor = db.execute(
+                "SELECT previous_run FROM release_history WHERE next_run=? AND action='activate' "
+                "ORDER BY id DESC LIMIT 1", (run,)
+            ).fetchone()
+            if predecessor is None:
+                raise ValueError('Release has no recorded activation')
+            prior = predecessor[0]
+            if prior is None:
+                db.execute("DELETE FROM settings WHERE key='active_run'")
+            else:
+                self._plan(db, prior)
+                db.execute("UPDATE settings SET value=? WHERE key='active_run'", (prior,))
+            db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
+                       (run, prior, 'rollback'))
+        return dict(active_run=prior)
 
     def active(self):
         with self.connect() as db:
             row = db.execute('SELECT value FROM settings WHERE key=?', ('active_run',)).fetchone()
         return row[0] if row else None
+
+    def active_for(self, session):
+        """Bind each visitor to the first active run it encounters."""
+        with self.connect() as db:
+            bound = db.execute('SELECT run FROM visitor_runs WHERE session=?', (session,)).fetchone()
+            if bound:
+                return bound[0]
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if active:
+                db.execute('INSERT INTO visitor_runs VALUES (?,?)', (session, active[0]))
+                return active[0]
+            return None
 
     def deactivate(self):
         with self.connect() as db:
@@ -133,6 +187,41 @@ class ResearchLab:
         db.execute('INSERT INTO events(run,payload) VALUES (?,?)', (plan['run_id'], json.dumps(event)))
         return event
 
+    def _issue_lure(self, db, run, session, resource):
+        row = db.execute('SELECT token FROM lure_tokens WHERE run=? AND session=? AND resource=?',
+                         (run, session, resource)).fetchone()
+        if row:
+            return row[0]
+        token = secrets.token_urlsafe(24)
+        db.execute('INSERT INTO lure_tokens VALUES (?,?,?,?)', (run, session, resource, token))
+        return token
+
+    @staticmethod
+    def _remember_exposure(db, token, run, session, fact, event):
+        if token:
+            db.execute('INSERT OR IGNORE INTO exposures VALUES (?,?,?,?,?)',
+                       (token, run, session, fact, event['event_id']))
+
+    def record_lure_response(self, run, session, token):
+        """A response receipt means ASGI accepted the body containing this lure."""
+        with self.connect() as db:
+            issued = db.execute('SELECT 1 FROM lure_tokens WHERE run=? AND session=? AND token=?',
+                                (run, session, token)).fetchone()
+            if issued:
+                db.execute('INSERT OR IGNORE INTO lure_response_receipts(token_hash) VALUES (?)',
+                           (hashlib.sha256(token.encode()).hexdigest(),))
+
+    def observe_lure_use(self, token, entry, session):
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        with self.connect() as db:
+            sent = db.execute('SELECT 1 FROM lure_response_receipts WHERE token_hash=?',
+                              (token_hash,)).fetchone()
+            if sent:
+                db.execute('INSERT OR IGNORE INTO lure_uses(token_hash,entry,session) VALUES (?,?,?)',
+                           (token_hash, entry, session))
+                return True
+            return False
+
     def visit(self, run, resource, session, peer, agent, method='GET'):
         with self.connect() as db:
             plan = self._plan(db, run)
@@ -153,17 +242,17 @@ class ResearchLab:
                 node = next((n for n in scene['nodes'] if n['id'] == node_id), None)
                 if node:
                     variant = 'agent_note' if node.get('lure_instruction') else 'plain'
-                    token = secrets.token_urlsafe(24)
+                    token = (self._issue_lure(db, run, session, 'scene/' + node_id)
+                             if variant == 'agent_note' else None)
                     what.update(kind='research.delivery', resource='scene/' + node_id,
                                 node_id=node_id, offered_nodes=node['links'],
                                 service_id=service['id'] if service else None, input_event_id=policy.get('input_event_id'),
                                 fact_id=node['sources'][0]['fact_id'],
                                 source_fact_ids=[s['fact_id'] for s in node['sources']],
                                 origin='ai', variant=variant,
-                                token_hash=hashlib.sha256(token.encode()).hexdigest())
+                                token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
                     event = self._record(db, plan, session, peer, agent, what)
-                    db.execute('INSERT INTO exposures VALUES (?,?,?,?,?)',
-                               (token, run, session, node['sources'][0]['fact_id'], event['event_id']))
+                    self._remember_exposure(db, token, run, session, node['sources'][0]['fact_id'], event)
                     by_id = {n['id']: n for n in scene['nodes']}
                     rendered_body = compile_service_paths(node['body'], scene.get('services', []), root)
                     result = dict(title=node['title'], content=rendered_body,
@@ -184,12 +273,12 @@ class ResearchLab:
                                  documents=[dict(path=d['path'], href=f"{root}/documents/{d['id']}") for d in documents])
             doc = next((d for d in plan['documents'] if resource == f"documents/{d['id']}"), None)
             if doc and not scene:
-                token = secrets.token_urlsafe(24)
+                token = (self._issue_lure(db, run, session, f"documents/{doc['id']}")
+                         if variant == 'agent_note' else None)
                 what.update(kind='research.delivery', resource=f"documents/{doc['id']}", fact_id=doc['fact_id'],
-                            variant=variant, token_hash=hashlib.sha256(token.encode()).hexdigest())
+                            variant=variant, token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
                 event = self._record(db, plan, session, peer, agent, what)
-                db.execute('INSERT INTO exposures VALUES (?,?,?,?,?)',
-                           (token, run, session, doc['fact_id'], event['event_id']))
+                self._remember_exposure(db, token, run, session, doc['fact_id'], event)
                 result = dict(path=doc['path'], content=doc['content'])
                 if variant == 'agent_note':
                     result['maintenance_note'] = (
