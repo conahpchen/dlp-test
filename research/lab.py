@@ -180,7 +180,7 @@ class ResearchLab:
         return dict(run_id=run_id, version=1, variant=variant,
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
 
-    def activate(self, run):
+    def activate(self, run, *, approve_isolated=False):
         from research.service_planner import ReleasePreparationError, prepare_release
 
         with self.connect() as db:
@@ -189,27 +189,67 @@ class ResearchLab:
                 raise ValueError('Only model-generated scenes can be activated')
             previous = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
             revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
-
+            active_manifest = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
+        if previous and previous[0] == run and active_manifest and json.loads(active_manifest[0])["new_processes"]:
+            return dict(active_run=run, entry=f'/decoy/{run}/index')
         try:
-            manifest = prepare_release(plan)
+            manifest = prepare_release(plan, approve_isolated=approve_isolated)
         except ReleasePreparationError as exc:
             with self.connect() as db:
                 db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'rejected',?)",
                            (run, exc.code))
             raise
 
+        try:
+            with self.connect() as db:
+                active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+                latest_revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
+                if active != previous or latest_revision != revision or self._plan(db, run) != plan:
+                    raise ValueError('Release changed during preparation')
+                if manifest["new_processes"]:
+                    from research import isolated_mysql
+
+                    if not isolated_mysql.ready(run):
+                        raise ValueError("Isolated runtime changed during preparation")
+                db.execute("INSERT OR REPLACE INTO release_manifests VALUES (?,?)", (run, json.dumps(manifest)))
+                db.execute("INSERT INTO release_preparations(run,status) VALUES (?,'prepared')", (run,))
+                if not previous or previous[0] != run:
+                    db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
+                               (previous[0] if previous else None, run, 'activate'))
+                    db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
+        except Exception:
+            if manifest["new_processes"]:
+                self._retire_isolated(run)
+            raise
+        return dict(active_run=run, entry=f'/decoy/{run}/index')
+
+    def _retire_isolated(self, run):
+        from research import isolated_mysql
+
         with self.connect() as db:
             active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
-            latest_revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
-            if active != previous or latest_revision != revision or self._plan(db, run) != plan:
-                raise ValueError('Release changed during preparation')
-            db.execute("INSERT OR REPLACE INTO release_manifests VALUES (?,?)", (run, json.dumps(manifest)))
-            db.execute("INSERT INTO release_preparations(run,status) VALUES (?,'prepared')", (run,))
-            if not previous or previous[0] != run:
-                db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
-                           (previous[0] if previous else None, run, 'activate'))
-                db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
-        return dict(active_run=run, entry=f'/decoy/{run}/index')
+            if active and active[0] == run:
+                return False
+            try:
+                isolated_mysql.stop(run)
+                return True
+            except isolated_mysql.RuntimeUnavailable:
+                db.execute("INSERT INTO release_preparations(run,status,detail) "
+                           "VALUES (?,'cleanup_failed','isolated_runtime')", (run,))
+                return False
+
+    def retire_isolated(self, run):
+        with self.connect() as db:
+            plan = self._plan(db, run)
+            active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if active and active[0] == run:
+                raise ValueError("Withdraw the active release before retiring its runtime")
+            row = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
+        prepared = row and json.loads(row[0]).get("new_processes")
+        requested = "isolated_instance" in plan.get("scene", {}).get("capability_requests", ())
+        if not prepared and not requested:
+            raise ValueError("The release has no isolated runtime")
+        return {"run": run, "runtime_retired": self._retire_isolated(run)}
 
     def release_status(self, run):
         with self.connect() as db:
@@ -269,6 +309,8 @@ class ResearchLab:
             code = "mysql_unready" if failed == ["mysql_catalog"] else ",".join(failed)
             db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'compensated',?)",
                        (run, code))
+        if manifest.get("new_processes"):
+            self._retire_isolated(run)
         return {"status": "compensated", "active_run": predecessor}
 
     def rollback(self, run):
@@ -291,6 +333,9 @@ class ResearchLab:
                 db.execute("UPDATE settings SET value=? WHERE key='active_run'", (prior,))
             db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
                        (run, prior, 'rollback'))
+            row = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
+        if row and json.loads(row[0]).get("new_processes"):
+            self._retire_isolated(run)
         return dict(active_run=prior)
 
     def active(self):
@@ -323,6 +368,11 @@ class ResearchLab:
                 db.execute("INSERT INTO release_history(previous_run,next_run,action) VALUES (?,NULL,'deactivate')",
                            (active[0],))
                 db.execute("DELETE FROM settings WHERE key='active_run'")
+                row = db.execute("SELECT payload FROM release_manifests WHERE run=?", (active[0],)).fetchone()
+            else:
+                row = None
+        if row and json.loads(row[0]).get("new_processes"):
+            self._retire_isolated(active[0])
 
     def policy(self, run, session):
         with self.connect() as db:

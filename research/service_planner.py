@@ -3,6 +3,7 @@
 import os
 from dataclasses import asdict, dataclass
 
+from research import isolated_mysql
 from research.generation import validate_scene
 
 
@@ -18,10 +19,10 @@ CAPABILITIES = {
     "knowledge_documents": Capability(0, "embedded", "existing_scene", "low"),
     "http_routes": Capability(1, "http", "existing_visitor_listener", "low"),
     "mysql_catalog": Capability(2, "mysql", "configured_loopback", "moderate"),
-    "isolated_instance": Capability(3, "unsupported", "unavailable", "high"),
+    "isolated_instance": Capability(3, "mysql", "local_private_unix_socket", "high"),
 }
 MAX_HTTP_ROUTES = 8
-MAX_NEW_PROCESSES = 0
+MAX_NEW_PROCESSES = 1
 
 
 class ReleasePreparationError(ValueError):
@@ -48,7 +49,7 @@ def mysql_catalog_ready():
         return False
 
 
-def prepare_release(plan, probe=None):
+def prepare_release(plan, probe=None, *, approve_isolated=False):
     try:
         scene = validate_scene(plan["scene"], plan["documents"])
     except (KeyError, ValueError):
@@ -63,17 +64,26 @@ def prepare_release(plan, probe=None):
     if not http_listener_ready(plan):
         raise ReleasePreparationError("http_unready", "The configured HTTP listener failed readiness")
     selected = ["knowledge_documents", "http_routes"]
-    for request in scene.capability_requests:
-        if request == "isolated_instance":
-            raise ReleasePreparationError("runtime_unavailable", "No approved isolated runtime is available")
+    requests = scene.capability_requests
+    if "mysql_catalog" in requests:
         if not (probe or mysql_catalog_ready)():
             raise ReleasePreparationError("mysql_unready", "The configured MySQL catalog failed protocol readiness")
-        selected.append(request)
+        selected.append("mysql_catalog")
+    if "isolated_instance" in requests:
+        if not approve_isolated:
+            raise ReleasePreparationError("approval_required", "No approved isolated runtime for this release")
+        if not scene.isolated_reason:
+            raise ReleasePreparationError("missing_requirement", "An isolated runtime requires a full SQL capability")
+        try:
+            isolated_mysql.start(plan)
+        except isolated_mysql.RuntimeUnavailable as exc:
+            raise ReleasePreparationError("runtime_unavailable", str(exc)) from None
+        selected.append("isolated_instance")
     return {
         "world_version": plan["world_version"],
         "capabilities": [{"name": name, **asdict(CAPABILITIES[name])} for name in selected],
         "routes": services,
-        "new_processes": MAX_NEW_PROCESSES,
+        "new_processes": MAX_NEW_PROCESSES if "isolated_instance" in selected else 0,
     }
 
 
@@ -99,6 +109,7 @@ def unavailable(plan, manifest):
         "knowledge_documents": lambda scene: bool(scene.get("documents")),
         "http_routes": http_listener_ready,
         "mysql_catalog": lambda _scene: mysql_catalog_ready(),
+        "isolated_instance": lambda scene: isolated_mysql.ready(scene["run_id"]),
     }
     return sorted({item["name"] for item in manifest["capabilities"]
                    if item["name"] not in checks or not checks[item["name"]](plan)})

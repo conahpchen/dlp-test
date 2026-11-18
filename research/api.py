@@ -102,9 +102,18 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
             raise HTTPException(502, 'Scene generation or validation failed; no run was created') from exc
 
     @control_api.post('/runs/{run_id}/activate')
-    def activate(run_id: str):
+    def activate(run_id: str, approve_isolated: bool = False):
         try:
-            return current_lab().activate(run_id)
+            return current_lab().activate(run_id, approve_isolated=approve_isolated)
+        except KeyError as exc:
+            raise HTTPException(404, 'Unknown run') from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @control_api.post('/runs/{run_id}/release/retire')
+    def retire_isolated(run_id: str):
+        try:
+            return current_lab().retire_isolated(run_id)
         except KeyError as exc:
             raise HTTPException(404, 'Unknown run') from exc
         except ValueError as exc:

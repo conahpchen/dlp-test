@@ -41,6 +41,7 @@ class Scene(Strict):
     capability_requests: list[Literal["mysql_catalog", "isolated_instance"]] = Field(
         default_factory=list, max_length=2
     )
+    isolated_reason: Literal["relational_sql", "sql_transactions"] | None = None
 
 
 class Review(Strict):
@@ -54,9 +55,11 @@ SCENE_FORMAT = '''scene schema: {"title":"...","entry_node":"node-id",
 "body":"original narrative written by you", "sources":[{"fact_id":"existing ID",
 "quote":"EXACT nonempty substring of that fact's content"}], "links":["other-node-id"],
 "lure_instruction":null or "an original in-service verification request"}]}.
-Optional capability_requests may include only "mysql_catalog" for a preconfigured read-only
-catalog. Never promise a protocol that has not been approved and checked at publication.
-Specify no endpoint, port, credential or process command.
+Optional capability_requests can include "mysql_catalog" for a preconfigured read-only
+catalog. Request "isolated_instance" only when relational SQL or transactions are essential;
+set isolated_reason to "relational_sql" or "sql_transactions" respectively. Never promise
+a protocol that has not been approved and checked at publication. Specify no endpoint,
+port, credential or process command.
 Use 2-8 reachable nodes. Generate substantive, coherent business narratives, navigation and
 clues, not a selection of prewritten templates. Facts already given are authoritative; do not
 change hostnames, credentials or established business facts. New narrative is synthetic and

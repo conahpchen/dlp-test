@@ -43,11 +43,14 @@ def evidence_router(require_operator):
             raise HTTPException(404, "Unknown run") from exc
 
     @router.post("/api/evidence/runs/{run_id}/release/{action}")
-    def change_release(run_id: str, action: Literal["activate", "rollback"], request: Request):
+    def change_release(run_id: str, action: Literal["activate", "rollback"], request: Request,
+                       approve_isolated: bool = False):
         json_only(request)
         lab = current_lab()
         try:
-            return (lab.activate if action == "activate" else lab.rollback)(run_id)
+            if action == "activate":
+                return lab.activate(run_id, approve_isolated=approve_isolated)
+            return lab.rollback(run_id)
         except KeyError as exc:
             raise HTTPException(404, "Unknown run") from exc
         except ValueError as exc:

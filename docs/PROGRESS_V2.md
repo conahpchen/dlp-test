@@ -101,3 +101,11 @@
 - 控制面按发布清单检查知识库、HTTP 和 MySQL 两类网络运行时，连续两个相同失败时触发补偿。实际关闭本地 HTTP 健康端点，验证后台任务自动停止向新访客投放，同时保留已有会话。真实 MySQL 停机回退到先前场景的用例仍通过。
 - 隔离镜像内使用 libseccomp，关闭 SSH 转发与 SFTP，保持 Cowrie 真实入站可用。参考拓扑包括受限的 Cowrie、Web/假 AI、MySQL，以及独立鉴权的控制和 Dashboard 监听器。宿主生产账号权限、外部网关和防火墙尚需目标环境验证。
 - `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest HONEYNET_TEST_COWRIE_ISOLATED_IMAGE=dlp-cowrie-isolated:local .venv/bin/python -m pytest -q` 393 项通过，1 条既有依赖弃用警告。隔离镜像默认入口联调单独复跑通过。联合用例同时启动 Cowrie、Web/假 AI、MySQL、控制和 Dashboard，验证四协议同票据、各入口的访问边界及入站响应。
+
+
+### L3 独立 MySQL
+
+- 完整 MySQL 8.4 实例需经过模型声明、SQL 能力校验、人工显式批准和固定镜像摘要配置。发布前执行真实 Unix socket 登录和关联查询，主机端口不对外发布。数据来自绑定版本的 DWS 文档事实。
+- `tests/test_isolated_mysql_release.py` 实测缺少审批、镜像不存在、成功启动、查询 JOIN、客户端事务回滚、Docker 停机后场景补偿、人工回滚、清理容器和临时凭据。首轮 Docker 启动超时后发现一个测试容器停在 Created，已清理并将创建与启动分开，增加本机 Docker 操作超时。组合验证继续使用真实 Cowrie 镜像。
+- 本次 L3 范围为获授权的本机 Unix socket 与完整 MySQL，独立 HTTP/其他协议运行时和目标生产环境外部入口仍不在已验收范围。
+- 最终组合验证启用 `HONEYNET_TEST_L3_MYSQL_IMAGE=mysql@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902`、`HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest`、`HONEYNET_TEST_COWRIE_ISOLATED_IMAGE=dlp-cowrie-isolated:local`。执行 `.venv/bin/python -m pytest -q` 得到 394 项通过、1 条既有依赖弃用警告，Docker 无遗留测试 L3 容器。确定性回放也通过。

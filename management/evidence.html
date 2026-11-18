@@ -85,10 +85,17 @@ function renderRelease(run, release) {
     const button = document.createElement('button');
     const action = release.active ? 'rollback' : 'activate';
     button.textContent = release.active ? '回滚当前场景' : '审批并激活场景';
+    const isolated = document.createElement('input');
+    if (action === 'activate') {
+      isolated.type = 'checkbox';
+      const caption = document.createElement('label');
+      caption.append(isolated, '批准本机隔离 MySQL 实例');
+      card.append(caption);
+    }
     button.onclick = async () => {
       button.disabled = true;
       try {
-        const response = await fetch('/api/evidence/runs/' + encodeURIComponent(run) + '/release/' + action, {
+        const response = await fetch('/api/evidence/runs/' + encodeURIComponent(run) + '/release/' + action + '?approve_isolated=' + isolated.checked, {
           method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'
         });
         const result = await response.json();
