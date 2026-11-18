@@ -19,3 +19,21 @@ Schema 1 checkpoint 可直接读取。升级后首次保存写 Schema 2，新增
 Cowrie 的本地采集器可用 `python -m entries.cowrie.bridge --in /path/to/cowrie.json --out /path/to/events.jsonl --canary-state var/v2/research.sqlite`。桥接器读取原始传感器文件并对密码做匹配，统一导出保留哈希。Cowrie 自己的原始日志按敏感证据管理。此命令适用于拥有共享账本权限的本机桥接进程。
 
 经授权的控制面可以从 `GET /api/research/runs/{run_id}/canary-uses` 读取证据关系，并通过 `POST /api/research/canary-uses/{use_id}/revisions` 追加带原因的判断，写入当前 `revision`、`associated` 和 `reason`。原始使用证据与旧修订保留。
+
+
+### 启动 DWS 投影版 Cowrie
+
+从仓库根目录运行：
+
+```sh
+docker build -f deploy/Dockerfile.cowrie-dws -t dlp-cowrie-dws:local .
+mkdir -p var/v2-cowrie
+chmod 755 var/v2-cowrie
+export HONEYNET_COWRIE_EXPORT="$PWD/var/v2-cowrie/world.json"
+export HONEYNET_COWRIE_HOST=web01
+BUSINESS_STATE_FILE="$PWD/var/v2/world.json" .venv/bin/python -m entries.cowrie.projection \
+  --out "$HONEYNET_COWRIE_EXPORT" --host "$HONEYNET_COWRIE_HOST"
+deploy/run-v2-local.sh cowrie
+```
+
+已有的 visitor 单写进程可以在相同环境下启动，使它在 checkpoint 更新后原子替换专用投影文件。容器只需挂载该专用目录，文件路径与 checkpoint 分离。现存终端继续使用加载的投影；新终端载入替换后的文件。如果投影导出失败，旧的有效投影文件仍可读取，可通过上面的导出命令从 checkpoint 修复。checkpoint 与各协议投影之间的统一发布事务仍待建设。

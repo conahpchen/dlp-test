@@ -49,6 +49,9 @@ def persist(engine, audit, events):
     path = location()
     if not path:
         return
+    projection = os.environ.get("HONEYNET_COWRIE_EXPORT")
+    if projection and Path(projection).resolve().parent == path.resolve().parent:
+        raise ValueError("Cowrie export requires a separate directory from DWS state")
     path.parent.mkdir(parents=True, exist_ok=True)
     state = dict(
         schema=2,
@@ -74,3 +77,7 @@ def persist(engine, audit, events):
         os.fsync(out.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    if projection:
+        from entries.cowrie.projection import publish
+
+        publish(engine.world, projection, os.environ.get("HONEYNET_COWRIE_HOST", "web01"))

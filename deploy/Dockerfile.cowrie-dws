@@ -1,0 +1,5 @@
+FROM cowrie/cowrie@sha256:e7c4b4fe5fbb874e682c6c0c7a1daf1c3183c622d5cc2d281f453c1c4d9f97ac
+COPY --chmod=0444 entries/cowrie/runtime/start.py /cowrie/dws-start.py
+ENV HONEYNET_COWRIE_PROJECTION=/projection/world.json
+ENV COWRIE_HONEYPOT_HOSTNAME=web01
+CMD ["/cowrie/dws-start.py", "/cowrie/cowrie-env/bin/twistd", "-n", "--umask=0022", "--pidfile=", "--logger", "cowrie.python.logfile.stdoutLogger", "cowrie"]

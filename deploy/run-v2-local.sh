@@ -30,8 +30,25 @@ case "${1:-}" in
     unset RESEARCH_MODEL_API_KEY RESEARCH_MODEL_BASE_URL RESEARCH_MODEL HONEYNET_CONTROL_TOKEN HONEYNET_DASHBOARD_PASSWORD
     exec "$python_bin" -m entries.mysql.app
     ;;
+  cowrie)
+    projection=${HONEYNET_COWRIE_EXPORT:?set the path to an exported world.json}
+    case "${projection##*/}" in
+      world.json) ;;
+      *) echo "Cowrie export must be named world.json" >&2; exit 2 ;;
+    esac
+    [ -r "$projection" ] || { echo "Export a DWS projection before starting Cowrie" >&2; exit 2; }
+    projection_dir=$(cd "$(dirname "$projection")" && pwd -P)
+    checkpoint_dir=$(cd "$state_dir" && pwd -P)
+    [ "$projection_dir" != "$checkpoint_dir" ] || {
+      echo "Cowrie requires a dedicated export directory" >&2; exit 2;
+    }
+    exec docker run --rm -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
+      -e "COWRIE_HONEYPOT_HOSTNAME=${HONEYNET_COWRIE_HOST:-web01}" \
+      --mount "type=bind,source=$projection_dir,target=/projection,readonly" \
+      "${HONEYNET_COWRIE_IMAGE:-dlp-cowrie-dws:local}"
+    ;;
   *)
-    echo "Usage: $0 visitor|control|dashboard|mysql" >&2
+    echo "Usage: $0 visitor|control|dashboard|mysql|cowrie" >&2
     exit 2
     ;;
 esac
