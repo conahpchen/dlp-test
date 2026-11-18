@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>场景模板 · 蜜网管理</title>
+<style>
+  body {font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938}
+  header {background:#17283f;color:white;padding:1rem 2rem}
+  header a {color:white}
+  main {max-width:48rem;margin:2rem auto;padding:0 1rem}
+  form {background:white;border-radius:.6rem;padding:1.5rem}
+  label {display:block;margin:.9rem 0}
+  input,textarea,select,button {font:inherit;padding:.45rem}
+  textarea,input {box-sizing:border-box;display:block;width:100%}
+  button {background:#17283f;color:white;border:0;border-radius:.3rem;cursor:pointer}
+</style>
+<header><a href="/">返回运行总览</a></header>
+<main>
+  <h1>场景模板</h1>
+  <p>保存会创建模板的新修订版。创建研究场景时可选择具体修订。</p>
+  <form>
+    <label>选择模板 <select id="selection"></select></label>
+    <label>名称 <input id="name" maxlength="100" required></label>
+    <label>展示方式 <select id="variant"><option value="plain">普通知识库</option><option value="agent_note">带核验链接</option></select></label>
+    <label>合成场景生成目标 <textarea id="goal" rows="5" maxlength="2000" required></textarea></label>
+    <button type="submit">保存模板修订</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </form>
+</main>
+<script>
+  const selection = document.querySelector('#selection');
+  const nameField = document.querySelector('#name');
+  const variant = document.querySelector('#variant');
+  const goal = document.querySelector('#goal');
+  const status = document.querySelector('#status');
+  let templates = [];
+  function fill() {
+    const item = templates.find(template => template.template_id === selection.value);
+    nameField.value = item?.name ?? '';
+    variant.value = item?.variant ?? 'plain';
+    goal.value = item?.goal ?? '';
+    return item;
+  }
+  async function refresh(selected = '') {
+    const response = await fetch('/api/templates');
+    if (!response.ok) throw new Error('无法读取模板');
+    templates = await response.json();
+    selection.replaceChildren(new Option('新增模板', ''));
+    for (const item of templates) {
+      selection.add(new Option(item.name + ' · 修订 ' + item.revision, item.template_id));
+    }
+    selection.value = selected;
+    fill();
+  }
+  selection.onchange = fill;
+  document.querySelector('form').onsubmit = async event => {
+    event.preventDefault();
+    const item = templates.find(template => template.template_id === selection.value);
+    const body = {
+      name: nameField.value, variant: variant.value, goal: goal.value,
+      template_id: item?.template_id ?? null, expected_revision: item?.revision ?? 0
+    };
+    const button = event.currentTarget.querySelector('button');
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/templates', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      });
+      if (!response.ok) throw new Error(response.status === 409 ? '模板已更新或达到保存上限，请刷新后重试' : '保存失败，请检查字段');
+      const result = await response.json();
+      await refresh(result.template_id);
+      status.textContent = '已保存修订 ' + result.revision;
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  };
+  refresh().catch(error => { status.textContent = error.message; });
+</script>
+</html>

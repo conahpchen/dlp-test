@@ -22,6 +22,12 @@ class ResearchLab:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript('''
+            CREATE TABLE IF NOT EXISTS template_revisions (
+                template_id TEXT NOT NULL, revision INTEGER NOT NULL, name TEXT NOT NULL,
+                variant TEXT NOT NULL, goal TEXT NOT NULL,
+                PRIMARY KEY(template_id, revision));
+            INSERT OR IGNORE INTO template_revisions VALUES
+                ('operations', 1, '运维知识库', 'plain', '生成有业务关联的知识库与运维排查线索');
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, plan TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS visitor_runs (
                 session TEXT PRIMARY KEY, run TEXT NOT NULL);
@@ -64,22 +70,59 @@ class ResearchLab:
         finally:
             db.close()
 
-    def create(self, world, variant, model=None, goal=None):
+    @staticmethod
+    def _template(row):
+        return dict(zip(('template_id', 'revision', 'name', 'variant', 'goal'), row, strict=True))
+
+    def templates(self):
+        with self.connect() as db:
+            rows = db.execute(
+                'SELECT template_id,revision,name,variant,goal FROM template_revisions t '
+                'WHERE revision=(SELECT MAX(revision) FROM template_revisions WHERE template_id=t.template_id) '
+                'ORDER BY name,template_id'
+            ).fetchall()
+        return [self._template(row) for row in rows]
+
+    def template(self, template_id, revision):
+        with self.connect() as db:
+            row = db.execute('SELECT template_id,revision,name,variant,goal FROM template_revisions '
+                             'WHERE template_id=? AND revision=?', (template_id, revision)).fetchone()
+        if row is None:
+            raise KeyError(template_id)
+        return self._template(row)
+
+    def save_template(self, name, variant, goal, template_id=None, expected_revision=0):
+        template_id = template_id or secrets.token_hex(16)
+        with self.connect() as db:
+            latest = db.execute('SELECT COALESCE(MAX(revision), 0) FROM template_revisions '
+                                'WHERE template_id=?', (template_id,)).fetchone()[0]
+            if latest != expected_revision:
+                raise ValueError('模板版本已变化，请重新载入')
+            if not latest and db.execute('SELECT COUNT(DISTINCT template_id) FROM template_revisions').fetchone()[0] >= 100:
+                raise ValueError('最多保存 100 个模板')
+            row = (template_id, latest + 1, name, variant, goal)
+            db.execute('INSERT INTO template_revisions VALUES (?,?,?,?,?)', row)
+        return self._template(row)
+
+    def create(self, world, variant, model=None, goal=None, template=None):
         if variant not in VARIANTS:
             raise ValueError('Unsupported variant')
-        docs = sorted((f for f in world.all_current_cls('data')
+        version = world.meta['world_version']
+        docs = sorted((f for f in world.view(version).all_current_cls('data')
                        if f.payload['path'].startswith('/kb/') and not f.payload.get('deleted')
                        and not f.payload.get('canary')), key=lambda f: f.payload['path'])[:3]
         if not docs:
             raise ValueError('No grounded knowledge documents available')
         run_id = secrets.token_hex(16)
         plan = dict(run_id=run_id, version=1, variant=variant,
-                    world_version=world.meta['world_version'],
+                    world_version=version,
                     world_id=world.meta.get('world_id'), base_seconds=world.meta['base_seconds'],
                     documents=[dict(id=str(i), fact_id=f.fact_id, path=f.payload['path'],
                                     content=f.payload.get('content') or '') for i, f in enumerate(docs)],
                     allowed_actions=['continue_dialogue', 'reveal_clue', 'extend_trail'],
                     max_events=MAX_EVENTS)
+        if template:
+            plan['template'] = {key: template[key] for key in ('template_id', 'revision')}
         plan['origin'] = 'fixture'
         if model is not None:
             from research.generation import generate_scene

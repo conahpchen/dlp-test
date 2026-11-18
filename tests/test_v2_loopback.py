@@ -65,3 +65,17 @@ def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_pa
         data = dashboard.get("/api/runtime", auth=("operator", "test-dashboard")).json()
         assert data["events_by_entry"]["llm"] == 1
         assert data["http_response_p95_ms"] > 0
+        operator = ("operator", "test-dashboard")
+        assert public.get("/api/templates").status_code == 404
+        assert dashboard.get("/templates").status_code == 401
+        assert dashboard.get("/templates", auth=operator).status_code == 200
+        template = dashboard.post("/api/templates", auth=operator, json={
+            "name": "回环验收", "variant": "agent_note", "goal": "验证合成运维场景",
+        })
+        assert template.status_code == 200
+        saved = template.json()
+        run = control.post("/api/research/runs", headers=headers, json={
+            "mode": "fixture", "template_id": saved["template_id"], "template_revision": saved["revision"],
+        })
+        assert run.status_code == 200
+        assert public.get(run.json()["entry"]).status_code == 200

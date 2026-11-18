@@ -40,6 +40,8 @@ class RunSpec(BaseModel):
     mode: Literal['ai', 'fixture'] = 'ai'
     goal: str = Field(default='生成连贯的研发运维业务场景，观察访客意图并持续生成可信线索，引导深入探索', min_length=1, max_length=2000)
     variant: Literal['plain', 'agent_note'] = 'plain'
+    template_id: str | None = Field(default=None, max_length=32)
+    template_revision: int | None = Field(default=None, ge=1)
 
 
 def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='integrated'):
@@ -63,15 +65,26 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
     @control_api.post('/runs')
     def create(spec: RunSpec):
         try:
+            lab = current_lab()
+            template = None
+            if spec.template_id is not None or spec.template_revision is not None:
+                if not spec.template_id or spec.template_revision is None:
+                    raise HTTPException(422, 'Specify the template ID and revision together')
+                try:
+                    template = lab.template(spec.template_id, spec.template_revision)
+                except KeyError as exc:
+                    raise HTTPException(404, 'Unknown template revision') from exc
+            variant = template['variant'] if template else spec.variant
+            goal = template['goal'] if template else spec.goal
             if spec.mode == 'fixture':
-                return current_lab().create(engine_provider().world, spec.variant)
+                return lab.create(engine_provider().world, variant, template=template)
             from research.model import Model
 
             try:
                 model = Model()
             except ValueError as exc:
                 raise HTTPException(503, 'Configure the model service; AI mode never silently falls back to fixtures') from exc
-            return current_lab().create(engine_provider().world, spec.variant, model=model, goal=spec.goal)
+            return lab.create(engine_provider().world, variant, model=model, goal=goal, template=template)
         except Exception as exc:
             if isinstance(exc, HTTPException):
                 raise

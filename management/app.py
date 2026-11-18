@@ -1,4 +1,4 @@
-"""Read-only dashboard on its own authenticated listener."""
+"""Dashboard and template editor on their own authenticated listener."""
 
 import html
 import json
@@ -16,6 +16,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from audit.http_latency import samples
 from business.storage import location
+from management.templates import template_router
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 auth = HTTPBasic(auto_error=False)
@@ -27,6 +28,9 @@ def require_operator(credentials: HTTPBasicCredentials | None = Depends(auth)):
         credentials.password.encode(), token.encode()
     ):
         raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Basic"})
+
+
+app.include_router(template_router(require_operator))
 
 
 def research_metrics():
@@ -99,7 +103,7 @@ main{{padding:2rem;flex:1}} section{{display:grid;gap:1rem;grid-template-columns
 article,table{{background:white;padding:1rem;border-radius:.6rem}} h2{{font-size:1rem}}
 strong{{font-size:1.8rem}} td,th{{text-align:left;padding:.5rem}}
 @media(max-width:620px){{body{{display:block}} nav{{padding:1rem}}}}
-</style><nav aria-label="导航"><b>蜜网管理</b><a href="#overview">总览</a><a href="#services">DWS 服务投影</a></nav>
+</style><nav aria-label="导航"><b>蜜网管理</b><a href="#overview">总览</a><a href="#services">DWS 服务投影</a><a href="/templates">场景模板</a></nav>
 <main><h1 id="overview">运行总览</h1><section>{cards}</section>
 <p>HTTP 延迟来自最近 {data['http_sample_count']} 次请求的响应计时。</p>
 <h2 id="services">DWS 服务投影</h2><table><thead><tr><th>主机</th><th>协议</th><th>版本</th></tr></thead>
