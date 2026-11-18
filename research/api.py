@@ -14,6 +14,7 @@ from starlette.background import BackgroundTask
 
 from research.model_input import model_event
 from research.worker import enabled as async_adaptation, enqueue, result_status
+from research.registration import install_registration
 from research.lab import MYSQL_CANARY_ID_LENGTH, MYSQL_CANARY_PREFIX, ResearchLab
 
 
@@ -185,6 +186,8 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
 
     install_observer(app, current_lab, allow_model=surface == 'integrated')
 
+    install_registration(app, current_lab)
+
     @app.api_route('/decoy/{run_id}/{resource:path}', methods=['GET', 'POST'])
     async def decoy(run_id: str, resource: str, request: Request):
         from research.inputs import capture, clean_text
@@ -273,6 +276,7 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         lure_link = body.get('verification_link')
         receipt = None
         if status == 200 and lure_link:
+            body['registration'] = {'optional': True, 'href': f'/decoy/{run_id}/register'}
             token = lure_link.rsplit('/', 1)[-1]
             receipt = BackgroundTask(lab.record_lure_response, run_id, session, token)
             if os.environ.get('HONEYNET_ENABLE_MYSQL_CANARY') == '1':

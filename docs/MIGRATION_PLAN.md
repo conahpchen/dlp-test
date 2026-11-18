@@ -54,3 +54,6 @@ deploy/run-v2-local.sh cowrie
 模型默认每日允许预留 1,000,000 token，由共享 SQLite 账本 `RESEARCH_MODEL_BUDGET_FILE` 保存。未配置时，账本位于 `RESEARCH_STATE_FILE` 同目录。可设置 `RESEARCH_MODEL_DAILY_TOKENS`。费用上限通过 `RESEARCH_MODEL_DAILY_COST_MICROUSD` 配置，非零时需同时设置 `RESEARCH_MODEL_INPUT_MICROUSD_PER_MILLION` 和 `RESEARCH_MODEL_OUTPUT_MICROUSD_PER_MILLION`。成本按输入的保守估计与最大输出预留，避免依赖供应商返回计量；该估算不等同实际账单。UTC 日切换后使用新额度。
 
 控制面共享短时精确请求缓存与并发限制。供应商连续三次失败时进入 30 秒冷却，恢复时放行一个探测。将 `RESEARCH_ASYNC_ADAPTATION=1` 同时配置给 visitor 和 control 可启用后台适配。访客只对已分类活动提交有界任务，控制面处理队列。POST `/interact` 可返回 202，随后在同一 Cookie 会话 GET 同一路径。原有场景页面在排队或模型拒绝期间可继续访问。
+
+
+管理端「会话证据」可按实际研究 run 查看 Web 事件时间线、Agent 登记和 Canary 关联历史。含核验链接的诱饵响应提供可选登记入口，接收固定枚举的运行类型、框架、模型系列和任务类别。只接受收到过有效诱饵的来源会话，重复提交相同声明返回原编号。登记由客户端自报，行为假设及置信度单独显示。

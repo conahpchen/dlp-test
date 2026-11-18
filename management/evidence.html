@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话证据 · 蜜网管理</title>
+<style>
+body{font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938}
+header{padding:1rem 2rem;background:#17283f;color:white} header a{color:white}
+main{max-width:65rem;margin:2rem auto;padding:0 1rem}
+select,button{padding:.4rem;font:inherit} td,th{text-align:left;padding:.4rem;overflow-wrap:anywhere}
+article{background:white;padding:1rem;margin:1rem 0;border-radius:.5rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem}
+dl div{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin:.35rem 0}
+dd{margin:0;overflow-wrap:anywhere}
+</style>
+<header><a href="/">返回运行总览</a></header>
+<main>
+<h1>会话证据</h1>
+<label>研究场景 <select id="runs"></select></label>
+<button id="refresh" type="button">刷新证据</button>
+<p id="status" role="status"></p>
+<h2>Agent 登记</h2><div id="registrations"></div>
+<h2>Canary 命中</h2><div id="canaries"></div>
+<h2>Web 事件时间线</h2>
+<table>
+<thead><tr><th>逻辑时钟</th><th>会话</th><th>事件类型</th><th>DWS 版本</th></tr></thead>
+<tbody id="timeline"></tbody>
+</table>
+</main>
+<script>
+const runs = document.querySelector('#runs');
+const statusLine = document.querySelector('#status');
+const registrations = document.querySelector('#registrations');
+const canaries = document.querySelector('#canaries');
+const timeline = document.querySelector('#timeline');
+const fieldNames = {
+  framework:'框架', model_family:'模型系列', instance_kind:'运行类型', task:'任务类别',
+  registration_id:'登记编号', session:'观察会话', received_at:'接收时间', world_version:'世界版本',
+  recorded_event_count:'记录事件数', hypothesis:'行为假设', confidence:'置信度', evidence_use:'证据编号',
+  credential_id:'凭据标识', entry:'入口', associated:'有效关联', recorded_at:'观测时间', revision:'修订号'
+};
+async function get(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error('读取证据失败');
+  return response.json();
+}
+function group(title, fields) {
+  const section = document.createElement('section');
+  const heading = document.createElement('h3');
+  heading.textContent = title;
+  section.append(heading);
+  const list = document.createElement('dl');
+  for (const [key,value] of Object.entries(fields)) {
+    const row = document.createElement('div');
+    const term = document.createElement('dt');
+    const description = document.createElement('dd');
+    term.textContent = fieldNames[key] ?? key;
+    description.textContent = value;
+    row.append(term,description);
+    list.append(row);
+  }
+  section.append(list);
+  return section;
+}
+async function refresh() {
+  try {
+    const selected = runs.value;
+    registrations.replaceChildren();
+    canaries.replaceChildren();
+    timeline.replaceChildren();
+    if (!selected) return;
+    const evidence = await get('/api/evidence/runs/' + encodeURIComponent(selected));
+    if (runs.value !== selected) return;
+    statusLine.textContent = '';
+    if (!evidence.registrations.length) registrations.textContent = '暂无登记';
+    if (!evidence.canary_uses.length) canaries.textContent = '暂无跨入口命中';
+    for (const row of evidence.registrations) {
+      const item = document.createElement('article');
+      item.className = 'grid';
+      item.append(group('自报信息',row.self_reported),group('服务端观测',row.server_observed),
+                  group('行为推断',row.inferred));
+      registrations.append(item);
+    }
+    for (const event of evidence.timeline) {
+      const row = document.createElement('tr');
+      for (const key of ['logical_time','session','kind','world_version']) {
+        const cell = document.createElement('td');
+        cell.textContent = event[key];
+        row.append(cell);
+      }
+      timeline.append(row);
+    }
+    for (const row of evidence.canary_uses) {
+      const {history,use_id,...fields} = row;
+      const item = document.createElement('article');
+      item.append(group('凭据使用证据', {evidence_use:use_id,...fields}));
+      if (history.length) {
+        const list = document.createElement('ul');
+        for (const revision of history) {
+          const line = document.createElement('li');
+          line.textContent = '修订 ' + revision.revision + ' · ' + revision.reason;
+          list.append(line);
+        }
+        item.append(list);
+      }
+      canaries.append(item);
+    }
+  } catch (error) {
+    statusLine.textContent = error.message;
+  }
+}
+async function start() {
+  try {
+    const rows = await get('/api/evidence/runs');
+    for (const row of rows) runs.add(new Option(row.run_id + ' · DWS ' + row.world_version,row.run_id));
+    if (!rows.length) statusLine.textContent = '暂无研究场景';
+    await refresh();
+  } catch (error) {
+    statusLine.textContent = error.message;
+  }
+}
+runs.onchange = refresh;
+document.querySelector('#refresh').onclick = refresh;
+start();
+</script>
+</html>

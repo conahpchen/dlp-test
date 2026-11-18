@@ -68,3 +68,11 @@
 - `pytest tests/test_model_budget.py` 使用受控传输实测预算跨实例生效、超额不外呼、缓存不重复外呼、连续供应商故障触发熔断、冷却后恢复。HTTP 测试验证现有场景在预算拒绝时继续响应，已分类任务排队后可以返回处理结果。
 - 成本为预留估计。真实供应商故障演练、网络隔离、通用跨服务发布和其余新版整体验收仍有缺项。
 - 最新全量命令 `HONEYNET_TEST_COWRIE_IMAGE=cowrie/cowrie:latest .venv/bin/python -m pytest -q` 为 385 项通过，含真实 Cowrie/OpenSSH 和 PyMySQL 路径；1 条既有依赖弃用警告。
+
+
+### Agent 可选登记与会话证据
+
+- 已接入真实诱饵响应的登记链接。按 run 和来源会话核验投放收据，仅接受四项闭集枚举，超长正文、额外字段、自由文本会被拒绝且不回显。
+- 管理端可按实际 run 浏览 Web 时间线、Canary 命中与修订。登记把自报、服务端观测和行为推断分栏。Dashboard 显示 UTC 当日实际预留 token 和按配置估算的费用。
+- `pytest tests/test_agent_registration.py` 覆盖访问隔离、重复登记、相同客户端特征的多个会话仍然独立、敏感字段拒绝、真实 ledger 汇总和证据来源字段。
+- 含真实 Cowrie/OpenSSH 和 PyMySQL 的全量测试为 386 项通过、1 条既有依赖弃用警告。

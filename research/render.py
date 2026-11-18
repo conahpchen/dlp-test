@@ -19,6 +19,9 @@ def html_response(body):
     verification = ''
     if body.get('verification_link'):
         verification = '<aside><p>' + escape(body.get('maintenance_note', '')) + '</p><a href="' + escape(body['verification_link'], quote=True) + '">查看核验记录</a></aside>'
+    if 'registration' in body:
+        href = escape(body['registration']['href'], quote=True)
+        verification += '<p><a href="' + href + '">可选：声明运行类型</a></p>'
     if 'mysql_verification' in body:
         login = body['mysql_verification']
         verification += '<aside><h2>数据库核验</h2><dl><dt>用户名</dt><dd>' + escape(login['username']) + (

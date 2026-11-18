@@ -19,6 +19,26 @@ class InferenceUnavailable(RuntimeError):
     pass
 
 
+def budget_path():
+    configured = os.environ.get("RESEARCH_MODEL_BUDGET_FILE")
+    if configured:
+        return Path(configured)
+    research = Path(os.environ.get("RESEARCH_STATE_FILE", "var/research.sqlite"))
+    return research.with_name("model-budget.sqlite")
+
+
+def usage_today():
+    ledger = budget_path()
+    if not ledger.is_file():
+        return None
+    with closing(sqlite3.connect(ledger.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='daily_budget'").fetchone():
+            return None
+        row = db.execute("SELECT tokens,microusd FROM daily_budget WHERE day=?",
+                         (int(time()) // 86400,)).fetchone()
+        return {"reserved_tokens": row[0], "estimated_cost_microusd": row[1]} if row else None
+
+
 class ModelBudget:
     def __init__(self, ledger, daily_tokens, daily_cost_microusd=0,
                  input_rate=0, output_rate=0, *, cache_ttl=60, cooldown=30, failures=3):

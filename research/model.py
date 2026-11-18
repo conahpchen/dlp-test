@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from research.model_budget import ModelBudget
+from research.model_budget import ModelBudget, budget_path
 
 
 MAX_PROMPT_BYTES = 96_000
@@ -32,12 +32,8 @@ class Model:
         if not self.name or not self.key:
             raise ValueError('Set RESEARCH_MODEL and RESEARCH_MODEL_API_KEY securely')
 
-        state = os.environ.get("RESEARCH_MODEL_BUDGET_FILE")
-        if state is None:
-            research = Path(os.environ.get("RESEARCH_STATE_FILE", "var/research.sqlite"))
-            state = str(research.with_name("model-budget.sqlite"))
         account = hashlib.sha256(self.key.encode()).hexdigest()
-        self.budget = budget if budget is not None else _budget(state, self.base, self.name, account)
+        self.budget = budget if budget is not None else _budget(str(budget_path()), self.base, self.name, account)
 
     def choose(self, messages):
         payload = {'model': self.name, 'messages': messages, 'temperature': 0,

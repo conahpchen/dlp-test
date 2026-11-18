@@ -16,8 +16,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from audit.http_latency import samples
 from business.atomic_state import read
 from business.storage import location
+from management.evidence import evidence_router
 from management.publications import publication_router
 from management.templates import template_router
+from research.model_budget import usage_today
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 auth = HTTPBasic(auto_error=False)
@@ -33,6 +35,7 @@ def require_operator(credentials: HTTPBasicCredentials | None = Depends(auth)):
 
 app.include_router(template_router(require_operator))
 app.include_router(publication_router(require_operator))
+app.include_router(evidence_router(require_operator))
 
 
 def research_metrics():
@@ -64,6 +67,7 @@ def runtime():
     hosts = [rows[-1]["payload"] for rows in state.get("facts", {}).get("host", {}).values()]
     return {
         "canary": research_metrics(),
+        "model_budget_today": usage_today(),
         "world_version": state.get("meta", {}).get("world_version"),
         "projected_services": [
             {"host": host["hostname"], "protocol": service.get("proto"), "version": service.get("ver")}
@@ -85,6 +89,7 @@ def get_runtime():
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_operator)])
 def dashboard():
     data = runtime()
+    budget = data["model_budget_today"] or {}
     cards = "".join(
         f'<article><h2>{title}</h2><strong>{html.escape(str(value)) if value is not None else "暂无数据"}</strong></article>'
         for title, value in (
@@ -95,6 +100,8 @@ def dashboard():
             ("假 AI API 凭据命中", data["canary"]["fake_api_matches"]),
             ("MySQL 核验命中", data["canary"]["mysql_matches"]),
             ("SSH 传感器命中", data["canary"]["ssh_matches"]),
+            ("今日模型预留 token", budget.get("reserved_tokens")),
+            ("今日模型费用估算（微美元）", budget.get("estimated_cost_microusd")),
         )
     )
     services = "".join(
@@ -111,7 +118,7 @@ main{{padding:2rem;flex:1}} section{{display:grid;gap:1rem;grid-template-columns
 article,table{{background:white;padding:1rem;border-radius:.6rem}} h2{{font-size:1rem}}
 strong{{font-size:1.8rem}} td,th{{text-align:left;padding:.5rem}}
 @media(max-width:620px){{body{{display:block}} nav{{padding:1rem}}}}
-</style><nav aria-label="导航"><b>蜜网管理</b><a href="#overview">总览</a><a href="#services">DWS 服务投影</a><a href="/templates">场景模板</a><a href="/publications">数据发布</a></nav>
+</style><nav aria-label="导航"><b>蜜网管理</b><a href="#overview">总览</a><a href="#services">DWS 服务投影</a><a href="/templates">场景模板</a><a href="/publications">数据发布</a><a href="/evidence">会话证据</a></nav>
 <main><h1 id="overview">运行总览</h1><section>{cards}</section>
 <p>HTTP 延迟来自最近 {data['http_sample_count']} 次请求的响应计时。</p>
 <h2 id="services">DWS 服务投影</h2><table><thead><tr><th>主机</th><th>协议</th><th>版本</th></tr></thead>

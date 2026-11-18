@@ -38,6 +38,10 @@ class ResearchLab:
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS release_history (
                 id INTEGER PRIMARY KEY, previous_run TEXT, next_run TEXT, action TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS agent_registrations (
+                run TEXT NOT NULL, session TEXT NOT NULL, registration_id TEXT NOT NULL UNIQUE,
+                claim TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(run,session));
             CREATE TABLE IF NOT EXISTS lure_tokens (
                 run TEXT NOT NULL, session TEXT NOT NULL, resource TEXT NOT NULL,
                 token TEXT NOT NULL UNIQUE, PRIMARY KEY(run,session,resource));
