@@ -44,7 +44,7 @@ flowchart TB
 | AI 搭建与校验 | [`research/generation.py`](../research/generation.py) | 生成原创场景图；精确来源摘录检查、可达性检查、节点约束和独立上下文复核 |
 | 在线交互与诱导 | [`research/controller.py`](../research/controller.py) | 根据轨迹推测意图，生成局部线索补丁；保留旧链接；有界修复；原子应用会话版本；没有模型封禁动作 |
 | 场景与证据存储 | [`research/lab.py`](../research/lab.py) | SQLite 保存轮次、事件、交付、会话策略和模型决策；服务生成节点；关联核验访问；计算探索指标 |
-| 业务观测 | [`research/observer.py`](../research/observer.py) | 观察激活场景下的真实 Web 请求、探测、登录失败和状态；关联会话；触发诱导；提供相关线索 Link 头 |
+| 业务观测 | [`research/observer.py`](../research/observer.py) | 观察激活场景下的真实 Web 请求、探测、登录失败和状态；关联会话；触发诱导；通过知识库响应提供相关线索，OA 将其渲染为可点击链接 |
 | 控制面与公开面 | [`research/api.py`](../research/api.py)、[`render.py`](../research/render.py) | 令牌保护创建/启用/分析；公开场景无控制令牌访问；安全 HTML 或 JSON 输出 |
 | 画像与报告 | [`research/analysis.py`](../research/analysis.py)、[`reporting.py`](../research/reporting.py) | 规则提示与模型判断分开；报告记录真实请求路径、响应、版本、意图、修复与跟随结果；令牌脱敏 |
 | 既有采集入口 | [`entries/cowrie/bridge.py`](../entries/cowrie/bridge.py)、[`entries/gateway/app.py`](../entries/gateway/app.py) | Cowrie 日志转统一事件；OpenAI 兼容蜜网入口。存在基础实现，完整在线生成接入仍待完成 |
@@ -69,7 +69,7 @@ AI 负责创作业务叙事、组织线索和选择下一步交互。生成结�
 2. 搭建模型生成 2–8 个节点，包含正文、链接、来源和可选核验引导。
 3. 程序检查节点 ID、来源摘录、链接可达性和允许的内容能力。
 4. 独立模型上下文复核事实一致性，区分阻断问题 `issues` 与非阻断备注 `notes`。
-5. 创建轮次并保存初始场景；管理者可将其启用到首页和 Web 观测。
+5. 创建轮次并保存初始场景；管理者可将其启用为新 Web 会话的观测及适配场景。
 
 模型不可用或生成失败时明确报错，不用固定模板冒充 AI 结果。显式 `fixture` 模式仅供离线回归与对照。
 
@@ -127,7 +127,7 @@ python3 -m venv .venv
 
 配置 `RESEARCH_MODEL_BASE_URL`、`RESEARCH_MODEL`、`RESEARCH_MODEL_API_KEY` 与 `HONEYNET_CONTROL_TOKEN`。默认模型地址为 `https://api.deepseek.com`、模型名 `deepseek-flash`；密钥由环境安全提供。详细参数见 [持续诱导方案](ADAPTIVE_RESEARCH.md)。
 
-使用控制令牌调用 `POST /api/research/runs` 创建 AI 场景，再调用 `POST /api/research/runs/{id}/activate` 启用。外部访客从首页或 `/decoy/{id}/index` 进入，无需控制令牌。`GET /api/research/runs/{id}` 获取研究记录；`DELETE /api/research/active` 取消启用并保留数据。
+使用控制令牌调用 `POST /api/research/runs` 创建 AI 场景，再调用 `POST /api/research/runs/{id}/activate` 启用。访客从首页进入预置 OA，服务端在后台绑定场景。知识库页面可展示当前会话通过校验的相关线索。独立演示可直接打开 `/decoy/{id}/index`。`GET /api/research/runs/{id}` 获取研究记录；`DELETE /api/research/active` 取消启用并保留数据。
 
 默认本地工作流无需启动红队、Docker、Postgres 或 Redis。部署已有 SSH/独立网关组件时另按 `deploy/` 和入口说明配置。
 

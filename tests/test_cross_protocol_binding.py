@@ -48,7 +48,8 @@ def test_approved_binding_keeps_web_fake_and_mysql_on_same_version(monkeypatch, 
     public = TestClient(visitor.app)
     bound_headers = {HEADER: token}
     assert public.get("/", headers=bound_headers, follow_redirects=False).headers["location"].endswith(run + "/index")
-    assert public.get("/", follow_redirects=False).headers["location"].endswith(run + "/index")
+    assert public.get("/", follow_redirects=False).status_code == 200
+    assert lab.active_for(public.cookies["research_session"]) == run
     assert public.get("/v1/models", headers=bound_headers).status_code == 401
     api_headers = dict(bound_headers, Authorization="Bearer sk-demo-internal-2026")
     assert public.get("/v1/models", headers=api_headers).json()["data"][0]["id"] == "corp-llm-7b"
