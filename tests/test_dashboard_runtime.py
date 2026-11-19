@@ -92,3 +92,10 @@ def test_alerts_show_actual_interactions_and_keep_credentials_out(monkeypatch, t
     assert [row["kind"] for row in web.json()["alerts"]] == ["login", "login_failed"]
     assert "temporary-wrong-value" not in web.text
     assert "认证失败" in dashboard.get("/alerts?source=ssh", auth=operator).text
+
+    overview = dashboard.get("/?days=30", auth=operator)
+    assert overview.status_code == 200
+    assert "告警趋势" in overview.text and "查看每日记录" in overview.text
+    assert "HTTP 响应分布" in overview.text and "认证失败" in overview.text
+    assert 'href="/?days=30" aria-current="true"' in overview.text
+    assert dashboard.get("/?days=31", auth=operator).status_code == 422
