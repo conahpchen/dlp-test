@@ -22,6 +22,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
+
+from audit.alerts import record as record_alert
 
 from dws.ids import ulid_now
 from dws.world import CommitRejected, World
@@ -242,6 +245,7 @@ async def login(request: Request):
 
     if cred is None:
         _audit(username or "-", "POST", "/api/login", 401)
+        await run_in_threadpool(record_alert, "web", "login_failed")
         return JSONResponse({"error": "用户名或密码错误"}, status_code=401)
 
     token = secrets.token_urlsafe(24)
@@ -253,6 +257,7 @@ async def login(request: Request):
             "cred_hash": cred_hash,
         }
     _audit(username, "POST", "/api/login", 200)
+    await run_in_threadpool(record_alert, "web", "login")
     return {"token": token, "username": username, "role": owner.payload["role"]}
 
 
@@ -455,7 +460,6 @@ async def v1_chat(request: Request):
     bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
     if re.fullmatch(r"[A-Za-z0-9_-]{32}", bearer):
         from research.api import current_lab
-        from starlette.concurrency import run_in_threadpool
 
         await run_in_threadpool(current_lab().observe_lure_use, bearer, "llm", session)
 
@@ -521,7 +525,9 @@ async def v1_chat(request: Request):
         resp = engine.process(event)
         _emit(event)
 
-    if resp.get("status") == "auth_fail":
+    authenticated = resp.get("status") != "auth_fail"
+    await run_in_threadpool(record_alert, "llm", "login" if authenticated else "login_failed")
+    if not authenticated:
         return JSONResponse(
             {
                 "error": {

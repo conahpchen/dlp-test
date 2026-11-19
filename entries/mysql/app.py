@@ -11,6 +11,7 @@ from mysql_mimic import MysqlServer, Session
 from mysql_mimic.auth import Forbidden, IdentityProvider, NativePasswordAuthPlugin, Success, User
 from mysql_mimic.errors import MysqlError
 
+from audit.alerts import record as record_alert
 from business.atomic_state import read
 from business.storage import location
 from dws.ids import entity_uuid, ulid_now
@@ -26,8 +27,8 @@ class CanaryUser(User):
     credential_id: str = ""
 
 
-class CanaryNativePassword(NativePasswordAuthPlugin):
-    """Record successful canary proof without granting a database session."""
+class CatalogNativePassword(NativePasswordAuthPlugin):
+    """Observe authentication and reject Canary credentials after proof is recorded."""
 
     def __init__(self, lab):
         self.lab = lab
@@ -41,9 +42,12 @@ class CanaryNativePassword(NativePasswordAuthPlugin):
             if isinstance(result, Success) and isinstance(auth_info.user, CanaryUser):
                 await asyncio.to_thread(self.lab.observe_canary_proof, auth_info.user.credential_id,
                                         "mysql", ulid_now())
-                yield Forbidden()
-            else:
-                yield result
+                result = Forbidden()
+            if isinstance(result, Forbidden):
+                await asyncio.to_thread(record_alert, "mysql", "login_failed")
+            elif isinstance(result, Success):
+                await asyncio.to_thread(record_alert, "mysql", "login")
+            yield result
 
 
 class CatalogCredentials(IdentityProvider):
@@ -55,9 +59,7 @@ class CatalogCredentials(IdentityProvider):
         self.bindings = bindings
 
     def get_plugins(self):
-        if self.lab is None:
-            return super().get_plugins()
-        return [CanaryNativePassword(self.lab)]
+        return [CatalogNativePassword(self.lab)]
 
     async def get_user(self, username):
         if username == "catalog_reader":
@@ -66,6 +68,7 @@ class CatalogCredentials(IdentityProvider):
             try:
                 await asyncio.to_thread(resolve, self.bindings, username.removeprefix(MYSQL_PREFIX))
             except KeyError:
+                await asyncio.to_thread(record_alert, "mysql", "login_failed")
                 return None
             return User(username, self.auth_string, NativePasswordAuthPlugin.name)
         short_id = username.removeprefix(MYSQL_CANARY_PREFIX)
@@ -77,6 +80,7 @@ class CatalogCredentials(IdentityProvider):
                 credential_id, token = credential
                 return CanaryUser(username, NativePasswordAuthPlugin.create_auth_string(token),
                                   NativePasswordAuthPlugin.name, credential_id=credential_id)
+        await asyncio.to_thread(record_alert, "mysql", "login_failed")
         return None
 
 
@@ -137,6 +141,7 @@ def create_server(checkpoint, password, lab=None, *, bindings=None):
     checkpoint = Path(checkpoint)
     CatalogSession(checkpoint)
     async def session_factory():
+        await asyncio.to_thread(record_alert, "mysql", "connection")
         return await asyncio.to_thread(CatalogSession, checkpoint, bindings)
 
     return MysqlServer(session_factory=session_factory,

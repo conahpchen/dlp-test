@@ -27,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 
+from audit.alerts import record as record_alert
 from dws.ids import ulid_now
 
 _KIND_MAP = {
@@ -97,9 +98,10 @@ def main(argv=None) -> int:
     parser.add_argument("--dst-host", default="web01", help="该入口对应的假主机名")
     parser.add_argument("--follow", action="store_true", help="跟随追加（部署模式）")
     parser.add_argument("--canary-state", help="本地研究 SQLite 凭据账本")
+    parser.add_argument("--alerts-only", action="store_true", help="采集告警，无需文件或 Redis 输出")
     args = parser.parse_args(argv)
 
-    if not args.out and not args.redis:
+    if not args.out and not args.redis and not args.alerts_only:
         parser.error("需要 --out 或 --redis 之一")
 
     lab = None
@@ -146,6 +148,11 @@ def main(argv=None) -> int:
         if event is None:
             skipped += 1
             return
+        kind = {"ssh.connection": "connection", "ssh.login": "login",
+                "ssh.login_fail": "login_failed"}.get(event["what"]["kind"])
+        if kind:
+            key = json.dumps([args.node, record.get("session"), record.get("timestamp"), kind])
+            record_alert("ssh", kind, hashlib.sha256(key.encode()).hexdigest())
         if lab and event["what"]["kind"] in ("ssh.login", "ssh.login_fail"):
             password = record.get("password")
             session = record.get("session")

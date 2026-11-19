@@ -12,6 +12,7 @@ else
 fi
 export RESEARCH_STATE_FILE="$state_dir/research.sqlite"
 export HONEYNET_LATENCY_FILE="$state_dir/http.sqlite"
+export HONEYNET_ALERTS_FILE="$state_dir/alerts.sqlite"
 python_bin=${PYTHON_BIN:-.venv/bin/python}
 if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ]; then
   export HONEYNET_VISITOR_HEALTH_PORT="${HONEYNET_VISITOR_HEALTH_PORT:-${HONEYNET_VISITOR_PORT:-8080}}"
@@ -63,15 +64,22 @@ case "${1:-}" in
     if [ "${HONEYNET_INGRESS_ONLY:-0}" = 1 ]; then
       image=dlp-cowrie-isolated:local
     fi
-    exec docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+    exec docker run --rm --name "${HONEYNET_COWRIE_CONTAINER:-dlp-cowrie-v2}" --cap-drop ALL --security-opt no-new-privileges \
       -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
       -e "HONEYNET_COWRIE_PROJECTION=/projection/${projection##*/}" \
       -e "COWRIE_HONEYPOT_HOSTNAME=${HONEYNET_COWRIE_HOST:-web01}" \
       --mount "type=bind,source=$projection_dir,target=/projection,readonly" \
       "${HONEYNET_COWRIE_IMAGE:-$image}"
     ;;
+  cowrie-events)
+    docker exec "${HONEYNET_COWRIE_CONTAINER:-dlp-cowrie-v2}" \
+      /cowrie/cowrie-env/bin/python -u -c "$(cat entries/cowrie/runtime/follow_events.py)" \
+      /cowrie/cowrie-git/var/log/cowrie/cowrie.json |
+      "$python_bin" -m entries.cowrie.bridge --in /dev/stdin --alerts-only --canary-state "$RESEARCH_STATE_FILE"
+    exit 1
+    ;;
   *)
-    echo "Usage: $0 visitor|control|dashboard|mysql|cowrie" >&2
+    echo "Usage: $0 visitor|control|dashboard|mysql|cowrie|cowrie-events" >&2
     exit 2
     ;;
 esac

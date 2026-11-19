@@ -55,3 +55,40 @@ def test_templates_are_authenticated_revisioned_and_used_in_runs(monkeypatch, tm
     plan = current_lab().plan(result.json()["run_id"])
     assert plan["variant"] == "agent_note"
     assert plan["template"] == {"template_id": identifier, "revision": 1}
+
+
+def test_alerts_show_actual_interactions_and_keep_credentials_out(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from entries.cowrie.bridge import main as bridge
+
+    monkeypatch.setenv("HONEYNET_ALERTS_FILE", str(tmp_path / "alerts.sqlite"))
+    monkeypatch.setenv("BUSINESS_STATE_FILE", str(tmp_path / "checkpoint.json"))
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    monkeypatch.setenv("HONEYNET_DASHBOARD_PASSWORD", "synthetic-test")
+    monkeypatch.setattr(business, "_engine", None)
+    public = TestClient(business.app)
+    dashboard = TestClient(management)
+    operator = ("operator", "synthetic-test")
+    assert public.get("/api/alerts").status_code == 404
+    assert dashboard.get("/api/alerts").status_code == 401
+    assert dashboard.get("/api/alerts", auth=operator).json()["alerts"] == []
+    login = {"username": "ops01", "password": "temporary-wrong-value"}
+    assert public.post("/api/login", json=login).status_code == 401
+    response = public.post("/api/login", json=dict(login, password="ops01-password"))
+    assert response.status_code == 200
+    headers = {"Authorization": "Bearer " + response.json()["token"]}
+    documents = public.get("/api/documents", headers=headers).json()
+    assert len([item for item in documents if item["key"].startswith("KB-OPS-")]) == 18
+    assert any(f.payload["path"] == "/kb/workspace/report-fields.md"
+               for f in business.get_engine().world.all_current_cls("data"))
+
+    log = Path(__file__).parent / "fixtures" / "cowrie.sample.jsonl"
+    for _ in range(2):
+        assert bridge(["--in", str(log), "--alerts-only"]) == 0
+    ssh = dashboard.get("/api/alerts?source=ssh", auth=operator)
+    assert [row["kind"] for row in ssh.json()["alerts"]] == ["login", "login_failed", "connection"]
+    web = dashboard.get("/api/alerts?source=web", auth=operator)
+    assert [row["kind"] for row in web.json()["alerts"]] == ["login", "login_failed"]
+    assert "temporary-wrong-value" not in web.text
+    assert "认证失败" in dashboard.get("/alerts?source=ssh", auth=operator).text
