@@ -83,7 +83,7 @@ export HONEYNET_PG_DSN="postgresql://honeynet:***@127.0.0.1:5432/honeynet"
 python -m replay.harness run --world ... --events ... --out artifacts/run --pg-dsn "$HONEYNET_PG_DSN"
 ```
 
-公网迁移（阶段二）见 `13-整体实施方案.md` §3.3 checklist 与 `deploy/compose.prod.yml`。
+v2.1 的入口配置与环境验收见 [部署实施手册](docs/DEPLOYMENT_RUNBOOK_ZH.md)。
 
 ## 开发纪律（13 §05，违反即 PR 拒绝）
 

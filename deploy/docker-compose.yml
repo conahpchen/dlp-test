@@ -1,6 +1,5 @@
-# deploy/docker-compose.yml —— 两阶段共用的单机编排（13 §03）
-# 阶段一（内网 PoC）：HONEYNET_BIND 保持默认 127.0.0.1，全栈不出内网
-# 阶段二（公网）：compose.prod.yml 覆盖层 + 13 §3.3 迁移 checklist
+# 早期内网 PoC 编排，供 Postgres 与 Cowrie 日志桥接联调。
+# v2.1 实施步骤见 docs/DEPLOYMENT_RUNBOOK_ZH.md。
 # 项目名用环境变量/命令行指定（兼容老版 compose）：docker compose -p honeynet up -d
 
 services:
