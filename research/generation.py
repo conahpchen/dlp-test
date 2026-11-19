@@ -19,7 +19,7 @@ class SceneNode(Strict):
     id: str = Field(pattern=r'^[a-z][a-z0-9-]{0,31}$')
     title: str = Field(min_length=1, max_length=120)
     body: str = Field(min_length=1, max_length=4000)
-    sources: list[Source] = Field(min_length=1, max_length=6)
+    sources: list[Source] = Field(default_factory=list, max_length=6)
     links: list[str] = Field(max_length=8)
     lure_instruction: str | None = Field(default=None, max_length=500)
 
@@ -66,7 +66,8 @@ clues, not a selection of prewritten templates. Facts already given are authorit
 change hostnames, credentials or established business facts. New narrative is synthetic and
 must remain consistent with those sources. Lures may ask for a local HTTP verification only.
 No URLs, shell commands, external dependencies or credential requests. Link targets are node IDs;
-server constructs URLs. Each node needs at least one genuine exact source quotation.
+server constructs URLs. A node may omit sources or supply an empty list for original
+synthetic content. Any citations supplied must use genuine exact source quotations.
 Do not present newly authored case narratives or invented historical incidents as records
 already verified by DWS. Distinguish proposed checks from established observations.'''
 

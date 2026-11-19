@@ -102,6 +102,31 @@ def test_no_fixture_fallback_when_model_missing(client, monkeypatch):
     assert r.status_code == 503
 
 
+def test_generated_pages_without_sources_can_deliver_and_verify_canary(client, model, monkeypatch):
+    draft = model.draft
+
+    def original_scene(documents):
+        scene = draft(documents)
+        del scene['nodes'][0]['sources']
+        scene['nodes'][1]['sources'] = []
+        return scene
+
+    monkeypatch.setattr(model, 'draft', original_scene)
+    scenario = create(client)
+    assert client.get(scenario['entry']).status_code == 200
+    page = client.get(f"/decoy/{scenario['run_id']}/scene/evidence")
+    assert page.status_code == 200
+    assert client.get(page.json()['verification_link']).json() == {'received': True}
+    report = client.get(f"/api/research/runs/{scenario['run_id']}",
+                        headers={'x-control-token': 'test-generative-control'}).json()
+    events = [event['what'] for event in report['events']]
+    assert [event['kind'] for event in events] == [
+        'research.delivery', 'research.delivery', 'research.beacon'
+    ]
+    assert all('fact_id' not in event for event in events)
+    assert events[1]['source_fact_ids'] == []
+
+
 def test_reviewer_rejection_does_not_persist_scene(lab, world, model):
     model.reject_review = True
     with pytest.raises(ValueError,match='review rejected'):
