@@ -76,6 +76,7 @@ class World:
         }
         self.facts: dict[str, dict[str, list[Fact]]] = {c: {} for c in ENTITY_KEYS}
         self.sessions: dict[str, Session] = {}
+        self.private_versions: set[int] = set()
         self.cas_conflicts = 0
         self.commits_ok = 0
         self.commits_rejected = 0
@@ -112,24 +113,29 @@ class World:
     # ------------------------------------------------------------- 会话
 
     def open_session(self, session_id: str, attacker_id: str, user: Optional[str],
-                     host_entity_id: Optional[str]) -> Session:
+                     host_entity_id: Optional[str], *, pinned_version: int | None = None) -> Session:
         """会话开始：钉定当前世界版本（契约 §5.1）。已存在的会话重复登录则刷新用户。"""
+        if pinned_version is not None and not SEED_VERSION <= pinned_version <= self.meta["world_version"]:
+            raise ValueError("DWS session version is unavailable")
         sess = self.sessions.get(session_id)
         if sess is None:
             sess = Session(
                 session_id=session_id, attacker_id=attacker_id, user=user,
-                pinned_version=self.meta["world_version"],
+                pinned_version=pinned_version if pinned_version is not None else self.meta["world_version"],
                 started_hlc=self.meta["now_hlc"],
                 host_entity_id=host_entity_id)
             self.sessions[session_id] = sess
         else:
+            if pinned_version is not None and sess.pinned_version != pinned_version:
+                raise ValueError("DWS session version is already bound")
             sess.user = user
         return sess
 
     # ------------------------------------------------------------- 提交
 
     def commit(self, session_id: Optional[str], proposals: list,
-               base_version: int, hlc: str, attacker_id: Optional[str] = None) -> CommitResult:
+               base_version: int, hlc: str, attacker_id: Optional[str] = None,
+               *, private: bool = False) -> CommitResult:
         """单事务提交。proposals = [(cls, payload), ...]；失败干净回滚。
 
         - CAS: base_version 必须等于当前 world_version，否则 CommitConflict
@@ -145,6 +151,8 @@ class World:
             raise ValueError("empty commit")
 
         sess = self.sessions.get(session_id) if session_id else None
+        if private and sess is None:
+            raise ValueError("Private writes require a bound session")
         attacker = sess.attacker_id if sess else attacker_id
         next_world = self.meta["world_version"] + 1
 
@@ -196,6 +204,8 @@ class World:
             raise CommitRejected("; ".join(str(v) for v in violations))
 
         self.meta["world_version"] = next_world
+        if private:
+            self.private_versions.add(next_world)
         if sess is not None:
             sess.own_versions.add(next_world)
             for cls, eid in distinct_new:
@@ -225,7 +235,11 @@ class View:
         self.own = set(own_versions)
 
     def _visible(self, f: Fact) -> bool:
-        return f.world_version <= self.pinned or f.world_version in self.own
+        if f.world_version in self.own:
+            return True
+        if f.cls != "timeline" and f.world_version in self.world.private_versions:
+            return False
+        return f.world_version <= self.pinned
 
     def current(self, cls: str, entity_id: str) -> Optional[Fact]:
         best = None

@@ -21,6 +21,8 @@ import datetime as _dt
 import hashlib
 import ipaddress
 import json
+import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -94,10 +96,17 @@ def main(argv=None) -> int:
     parser.add_argument("--node", default="sensor-a")
     parser.add_argument("--dst-host", default="web01", help="该入口对应的假主机名")
     parser.add_argument("--follow", action="store_true", help="跟随追加（部署模式）")
+    parser.add_argument("--canary-state", help="本地研究 SQLite 凭据账本")
     args = parser.parse_args(argv)
 
     if not args.out and not args.redis:
         parser.error("需要 --out 或 --redis 之一")
+
+    lab = None
+    if args.canary_state:
+        from research.lab import ResearchLab
+
+        lab = ResearchLab(args.canary_state)
 
     sink = None
     if args.out:
@@ -137,6 +146,14 @@ def main(argv=None) -> int:
         if event is None:
             skipped += 1
             return
+        if lab and event["what"]["kind"] in ("ssh.login", "ssh.login_fail"):
+            password = record.get("password")
+            session = record.get("session")
+            if isinstance(password, str) and re.fullmatch(r"[A-Za-z0-9_-]{32}", password) and session:
+                try:
+                    lab.observe_lure_use(password, "ssh", f"{args.node}/{session}")
+                except sqlite3.Error:
+                    print("bridge: Canary evidence store unavailable", file=sys.stderr)
         counter += 1
         payload = json.dumps(event, ensure_ascii=False, sort_keys=True)
         if args.out:

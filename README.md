@@ -1,5 +1,8 @@
 # 澄川研发服务平台 · 蜜网业务增强版
 
+- [项目介绍](docs/PROJECT_OVERVIEW_ZH.md) 说明项目用途、主要能力、工作原理和当前实现范围，可直接分享给项目听众。
+- [部署实施手册](docs/DEPLOYMENT_RUNBOOK_ZH.md) 提供安装、启动、验收与回退步骤，供实施人员使用。
+
 新增 [攻击者输入驱动的 AI 蜜罐](docs/INPUT_DRIVEN_HONEYPOT.md)：理解参数和正文，动态生成会话内模拟接口与回复。
 
 当前完整说明：[实现方案、模块与原理](docs/CURRENT_IMPLEMENTATION.md)。
@@ -80,7 +83,7 @@ export HONEYNET_PG_DSN="postgresql://honeynet:***@127.0.0.1:5432/honeynet"
 python -m replay.harness run --world ... --events ... --out artifacts/run --pg-dsn "$HONEYNET_PG_DSN"
 ```
 
-公网迁移（阶段二）见 `13-整体实施方案.md` §3.3 checklist 与 `deploy/compose.prod.yml`。
+v2.1 的入口配置与环境验收见 [部署实施手册](docs/DEPLOYMENT_RUNBOOK_ZH.md)。
 
 ## 开发纪律（13 §05，违反即 PR 拒绝）
 

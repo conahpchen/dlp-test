@@ -66,12 +66,15 @@ class Engine:
         except GroundingMiss as miss:
             inner = self._fallback(event, miss)
 
+        session = self.world.sessions.get(event["session"])
+        bound_version = session.pinned_version if session else start_version
+        event["dws_version"] = bound_version
         resp = {
             "event_id": event["event_id"],
             "entry": event["entry"],
             "session": event["session"],
             "attacker_id": attacker,
-            "dws_version": start_version,
+            "dws_version": bound_version,
             "status": inner[0],
             "output": inner[1],
             "by": inner[2],
@@ -82,17 +85,17 @@ class Engine:
 
     # ------------------------------------------------------------ 提交
 
-    def _commit(self, session_id, proposals, hlc, attacker_id=None) -> None:
+    def _commit(self, session_id, proposals, hlc, attacker_id=None, *, private=False) -> None:
         """CAS 提交：冲突重试一次（契约 §5.3），仍冲突 → fail-closed。"""
         try:
             self.world.commit(session_id, proposals, self.world.meta["world_version"],
-                              str(hlc), attacker_id=attacker_id)
+                              str(hlc), attacker_id=attacker_id, private=private)
         except CommitConflict:
             self.metrics["cas_conflicts"] += 1
             try:
                 self.world.commit(session_id, proposals,
                                   self.world.meta["world_version"], str(hlc),
-                                  attacker_id=attacker_id)
+                                  attacker_id=attacker_id, private=private)
             except CommitConflict:
                 raise GroundingMiss("CAS 二次冲突，fail-closed")
 
@@ -114,6 +117,10 @@ class Engine:
         host = self.world.current("host", host_eid)
         if host is None:
             raise GroundingMiss(f"目标主机 {event['dst']['host']} 不在世界中")
+        session = self.world.open_session(event["session"], attacker, None, host_eid)
+        host = self.session_view(session.session_id).current("host", host_eid)
+        if host is None:
+            raise GroundingMiss("Host is absent from the bound world")
         banner = host.payload.get("banner") or f"Welcome to {host.payload['os'] or 'Linux'}"
         self._commit(None, [self._timeline(event, "connection", f"host:{host_eid}")],
                      hlc, attacker_id=attacker)
@@ -132,12 +139,13 @@ class Engine:
         dst = event["dst"]["host"]
         host_eid = entity_uuid("host", dst)
 
+        view = self.session_view(event["session"])
         match = None
-        for c in self.world.all_current_cls("credential"):
+        for c in view.all_current_cls("credential"):
             p = c.payload
             if p["secret_hash"] != cred or p["revoked_at_hlc"] is not None:
                 continue
-            owner = self.world.current("identity", p["owner_entity_id"])
+            owner = view.current("identity", p["owner_entity_id"])
             if owner is None or owner.payload["username"] != user:
                 continue
             if dst in {v["host"] for v in p["valid_on"]}:
@@ -151,7 +159,7 @@ class Engine:
 
         c, owner = match
         sess = self.world.open_session(event["session"], attacker, user, host_eid)
-        host = self.world.current("host", host_eid)
+        host = view.current("host", host_eid)
         self._commit(event["session"],
                      [self._timeline(event, "login", f"identity:{owner.entity_id}")], hlc)
         return ("ok", [f"Welcome to {host.payload['os'] or 'Linux'} ({host.payload['hostname']})"],
@@ -159,7 +167,7 @@ class Engine:
 
     def _command(self, event, attacker, hlc):
         sess = self.world.sessions.get(event["session"])
-        if sess is None:
+        if sess is None or sess.user is None:
             raise GroundingMiss("命令出现在未认证会话中")
         try:
             argv = shlex.split(event["what"]["cmd"])
@@ -176,7 +184,7 @@ class Engine:
         all_props = [self._timeline(event, "cmd", f"host:{sess.host_entity_id}")] + proposals
         if proposals:
             try:
-                self._commit(event["session"], all_props, hlc)
+                self._commit(event["session"], all_props, hlc, private=True)
             except CommitRejected:
                 # 预算超限/裁决拒绝 → fail-closed：拒绝扩张但不矛盾（契约 §5.2/§5.3）
                 return ("rejected", [f"bash: {argv[0]}: Operation not permitted"], "template")
@@ -208,15 +216,29 @@ class Engine:
 
     # ------------------------------------------------------------ LLM 入口（M1，契约 12 §11/§8）
 
-    def check_llm_key(self, cred_hash: str | None) -> bool:
-        """API key 有效性预检（网关判定 ctx 用；引擎内鉴权仍以 _llm_chat 为准）。"""
-        return self._match_llm_credential(cred_hash) is not None
+    def session_view(self, session_id=None):
+        session = self.world.sessions.get(session_id)
+        if session is None:
+            return self.world.view(self.world.meta["world_version"])
+        return self.world.view(session.pinned_version, session.own_versions)
 
-    def _match_llm_credential(self, cred_hash: str | None):
+    def llm_models(self, session_id=None):
+        return sorted({
+            service["ver"]
+            for host in self.session_view(session_id).all_current_cls("host")
+            for service in host.payload.get("services", ())
+            if service.get("proto") == "openai" and service.get("ver")
+        })
+
+    def check_llm_key(self, cred_hash: str | None, session_id=None) -> bool:
+        """API key 有效性预检（网关判定 ctx 用；引擎内鉴权仍以 _llm_chat 为准）。"""
+        return self._match_llm_credential(cred_hash, session_id) is not None
+
+    def _match_llm_credential(self, cred_hash: str | None, session_id=None, *, view=None):
         """有效 = 凭据未吊销且 valid_on 声明了 openai 服务（entry llm）。"""
         if not cred_hash:
             return None
-        for c in self.world.all_current_cls("credential"):
+        for c in (view or self.session_view(session_id)).all_current_cls("credential"):
             p = c.payload
             if p["secret_hash"] != cred_hash or p["revoked_at_hlc"] is not None:
                 continue
@@ -228,7 +250,7 @@ class Engine:
         """LLM chat：DWS 凭据鉴权 → 判定（verdict 缺省由 L1 现算）→ 按预算 grounded 生成。"""
         cred = (event.get("who") or {}).get("cred_hash")
         host_eid = entity_uuid("host", event["dst"]["host"])
-        match = self._match_llm_credential(cred)
+        match = self._match_llm_credential(cred, event["session"])
         if match is None:
             self.auth_fails[attacker] = self.auth_fails.get(attacker, 0) + 1
             self._commit(None, [self._timeline(event, "llm_auth_fail", f"host:{host_eid}")],

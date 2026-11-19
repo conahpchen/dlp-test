@@ -8,6 +8,7 @@ from business import app as biz
 from dws.world import World
 from experiments.research_loop import local_origin, model_visitor
 from replay.harness import validate_events
+from research.api import current_lab
 from research.analysis import analyze
 from research.lab import ResearchLab
 
@@ -128,7 +129,17 @@ def test_control_boundary_and_public_cookie(client, monkeypatch):
     assert response.status_code == 200
     assert 'HttpOnly' in response.headers['set-cookie']
     document = client.get(response.json()['documents'][0]['href']).json()
+    with current_lab().connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM lure_response_receipts').fetchone()[0] == 1
     assert client.get(document['verification_link']).status_code == 200
+    token = document['verification_link'].rsplit('/', 1)[-1]
+    cross = client.post('/v1/chat/completions', headers={'Authorization': 'Bearer ' + token},
+                        json={'model': 'corp-llm-7b'})
+    assert cross.status_code == 401
+    with current_lab().connect() as db:
+        use = db.execute('SELECT token_hash,entry FROM lure_uses').fetchone()
+        receipt = db.execute('SELECT token_hash FROM lure_response_receipts').fetchone()
+    assert use == (receipt[0], 'llm')
     assert client.get('/api/research/runs/' + run, headers=headers).json()['metrics']['followed_deliveries'] == 1
     monkeypatch.delenv('HONEYNET_CONTROL_TOKEN')
     assert client.get('/api/research/runs/' + run, headers=headers).status_code == 404

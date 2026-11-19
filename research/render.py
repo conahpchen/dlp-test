@@ -19,6 +19,14 @@ def html_response(body):
     verification = ''
     if body.get('verification_link'):
         verification = '<aside><p>' + escape(body.get('maintenance_note', '')) + '</p><a href="' + escape(body['verification_link'], quote=True) + '">查看核验记录</a></aside>'
+    if 'registration' in body:
+        href = escape(body['registration']['href'], quote=True)
+        verification += '<p><a href="' + href + '">可选：声明运行类型</a></p>'
+    if 'mysql_verification' in body:
+        login = body['mysql_verification']
+        verification += '<aside><h2>数据库核验</h2><dl><dt>用户名</dt><dd>' + escape(login['username']) + (
+            '</dd><dt>密码</dt><dd>' + escape(login['password']) + '</dd></dl></aside>'
+        )
     return HTMLResponse('<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
                         '<meta name="viewport" content="width=device-width,initial-scale=1">'
                         '<title>' + escape(body.get('title', '知识中心')) + '</title>'
