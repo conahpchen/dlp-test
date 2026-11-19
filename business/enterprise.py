@@ -3,7 +3,10 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from fastapi import Request, HTTPException
+from dws.hlc import HLC
 from dws.ids import entity_uuid
+
+from business.demo_documents import DOCUMENTS
 
 PEOPLE = {
     "dev01": ("林砚", "研发部"),
@@ -310,6 +313,22 @@ def enrich_seed(seed):
                 revision=i + 1,
             ),
         )
+    seed_time = str(HLC(seed["meta"]["base_seconds"], 0, seed["meta"]["node"]))
+    usernames = {identity["username"] for identity in facts["identity"]}
+    paths = {item["path"] for item in facts.get("data", ())}
+    for index, (slug, title, owner, body) in enumerate(DOCUMENTS, 1):
+        path = f"/kb/workspace/{slug}.md"
+        if owner not in usernames or path in paths:
+            continue
+        obj("document", f"KB-OPS-{index:03d}", dict(
+            title=title, body=body, author=owner, space="研发运维",
+            revision=1, updated_at=date(index),
+        ))
+        facts.setdefault("data", []).append(dict(
+            path=path, owner_entity_id=entity_uuid("identity", owner),
+            ctime_hlc=seed_time, mtime_hlc=seed_time,
+            kind="file", content=f"# {title}\n\n{body}\n", canary=False, deleted=False,
+        ))
     obj(
         "announcement",
         "AN-0100",

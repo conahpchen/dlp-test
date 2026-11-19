@@ -25,7 +25,8 @@ export HONEYNET_STATE_DIR="${PWD}/var/v2-state"
 export HONEYNET_COWRIE_EXPORT="${PWD}/var/v2-projection/world.sqlite"
 export HONEYNET_DWS_ATOMIC=1
 export HONEYNET_INGRESS_ONLY=1
-install -d -m 0700 "$HONEYNET_STATE_DIR" "$(dirname "$HONEYNET_COWRIE_EXPORT")"
+install -d -m 0700 "$HONEYNET_STATE_DIR"
+install -d -m 0755 "$(dirname "$HONEYNET_COWRIE_EXPORT")"
 ```
 
 | 启动顺序 | 命令 | 回环端口 | 启动条件 |
@@ -37,6 +38,8 @@ install -d -m 0700 "$HONEYNET_STATE_DIR" "$(dirname "$HONEYNET_COWRIE_EXPORT")"
 | 5 | `deploy/run-v2-local.sh dashboard` | 8082 | 设置 `HONEYNET_DASHBOARD_PASSWORD`，以 `operator` 登录。配置实际探测端口。 |
 
 启动器以前台方式运行。演示可在独立终端操作，持久运行时由服务管理器分别托管。自定义端口时同步更新 Dashboard 的 `HONEYNET_VISITOR_PORT`、`HONEYNET_COWRIE_PORT`、`HONEYNET_MYSQL_PORT` 和 `HONEYNET_DASHBOARD_PORT`，以及控制面的访客健康探测配置。[启动器](../deploy/run-v2-local.sh)
+
+启动 Cowrie 后，用同一套环境变量在独立终端运行 `deploy/run-v2-local.sh cowrie-events`。此采集进程读取 Cowrie 的 JSON 日志，提供 SSH 连接、认证和 Canary 关联。容器重启后一起重启采集进程。Dashboard、访客、MySQL 和采集进程通过同一状态目录交换告警记录。Dashboard 的「告警中心」可按入口筛选，使用页面刷新获取最近记录。
 
 ## 3. 配置演示入口
 

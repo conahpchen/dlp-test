@@ -22,6 +22,8 @@ docker build -f deploy/Dockerfile.cowrie-isolated -t dlp-cowrie-isolated:local .
 
 ## 演示流程
 
+普通访客访问 `/` 时先看到预置 OA。登录演示账号后，可以通过知识库查看本会话已生成的「相关资料」。分离部署时在 visitor 和 control 进程同时设置 `RESEARCH_ASYNC_ADAPTATION=1`，由 control 处理模型任务。任务完成后重新打开知识库可看到通过校验的线索。单独演示场景可直接打开创建结果中的 `/decoy/{id}/index`。
+
 1. 使用 `operator` 登录 Dashboard。「部署与运行」展示实际监听器响应、当前发布、DWS 变更、HTTP p95 和模型预算。未配置或未采样时对应位置显示缺失状态。
 2. 在「场景模板」加载预置模板，保存新修订。从控制接口创建场景时传入该模板的 ID 和修订号。
 3. 在「数据发布」打开合成知识库文档草稿，审批后读取已发布版本，演示撤回。

@@ -18,6 +18,9 @@ from research.api import current_lab
 
 @pytest.mark.skipif(not os.environ.get("HONEYNET_TEST_COWRIE_IMAGE"), reason="requires local Cowrie image")
 def test_http_canary_correlates_real_cowrie_mysql_and_fake_ai(tmp_path, monkeypatch):
+    from audit.alerts import read_alerts
+
+    monkeypatch.setenv("HONEYNET_ALERTS_FILE", str(tmp_path / "alerts.sqlite"))
     image = os.environ["HONEYNET_TEST_COWRIE_IMAGE"]
     monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
     monkeypatch.setenv("BUSINESS_STATE_FILE", str(tmp_path / "world.json"))
@@ -108,3 +111,6 @@ def test_http_canary_correlates_real_cowrie_mysql_and_fake_ai(tmp_path, monkeypa
         matches = db.execute("SELECT token_hash,entry FROM lure_uses ORDER BY entry").fetchall()
     identifier = lab.canaries(run)[0]["credential_id"]
     assert matches == [(identifier, "llm"), (identifier, "mysql"), (identifier, "ssh")]
+
+    ssh_alerts = {alert["kind"] for alert in read_alerts("ssh")["alerts"]}
+    assert {"connection", "login_failed", "canary"} <= ssh_alerts

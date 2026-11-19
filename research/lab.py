@@ -580,15 +580,18 @@ class ResearchLab:
                     variant = 'agent_note' if node.get('lure_instruction') else 'plain'
                     token = (self._issue_lure(db, plan, session, 'scene/' + node_id)
                              if variant == 'agent_note' else None)
+                    source_ids = [source['fact_id'] for source in node.get('sources', [])]
+                    primary_fact = next(iter(source_ids), '')
+                    if primary_fact:
+                        what['fact_id'] = primary_fact
                     what.update(kind='research.delivery', resource='scene/' + node_id,
                                 node_id=node_id, offered_nodes=node['links'],
                                 service_id=service['id'] if service else None, input_event_id=policy.get('input_event_id'),
-                                fact_id=node['sources'][0]['fact_id'],
-                                source_fact_ids=[s['fact_id'] for s in node['sources']],
+                                source_fact_ids=source_ids,
                                 origin='ai', variant=variant,
                                 token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
                     event = self._record(db, plan, session, peer, agent, what)
-                    self._remember_exposure(db, token, run, session, node['sources'][0]['fact_id'], event)
+                    self._remember_exposure(db, token, run, session, primary_fact, event)
                     by_id = {n['id']: n for n in scene['nodes']}
                     rendered_body = compile_service_paths(node['body'], scene.get('services', []), root)
                     result = dict(title=node['title'], content=rendered_body,
@@ -636,7 +639,9 @@ class ResearchLab:
                                   (credential_id,)).fetchone()
                 if (row and row[0] == session and delivered_variant == 'agent_note' and status == 'active'
                         and (sent or not require_receipt)):
-                    what.update(kind='research.beacon', fact_id=row[1], delivery_event_id=row[2],
+                    if row[1]:
+                        what['fact_id'] = row[1]
+                    what.update(kind='research.beacon', delivery_event_id=row[2],
                                 token_hash=hashlib.sha256(token.encode()).hexdigest(), resource='beacon')
                     self._record(db, plan, session, peer, agent, what)
                     return 200, dict(received=True)

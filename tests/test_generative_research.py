@@ -102,6 +102,31 @@ def test_no_fixture_fallback_when_model_missing(client, monkeypatch):
     assert r.status_code == 503
 
 
+def test_generated_pages_without_sources_can_deliver_and_verify_canary(client, model, monkeypatch):
+    draft = model.draft
+
+    def original_scene(documents):
+        scene = draft(documents)
+        del scene['nodes'][0]['sources']
+        scene['nodes'][1]['sources'] = []
+        return scene
+
+    monkeypatch.setattr(model, 'draft', original_scene)
+    scenario = create(client)
+    assert client.get(scenario['entry']).status_code == 200
+    page = client.get(f"/decoy/{scenario['run_id']}/scene/evidence")
+    assert page.status_code == 200
+    assert client.get(page.json()['verification_link']).json() == {'received': True}
+    report = client.get(f"/api/research/runs/{scenario['run_id']}",
+                        headers={'x-control-token': 'test-generative-control'}).json()
+    events = [event['what'] for event in report['events']]
+    assert [event['kind'] for event in events] == [
+        'research.delivery', 'research.delivery', 'research.beacon'
+    ]
+    assert all('fact_id' not in event for event in events)
+    assert events[1]['source_fact_ids'] == []
+
+
 def test_reviewer_rejection_does_not_persist_scene(lab, world, model):
     model.reject_review = True
     with pytest.raises(ValueError,match='review rejected'):
@@ -152,16 +177,35 @@ def test_active_scene_observes_real_business_traffic(client, monkeypatch):
     headers = {'x-control-token':'test-generative-control'}
     run = scenario['run_id']
     assert client.post('/api/research/runs/'+run+'/activate',headers=headers).status_code == 200
-    assert client.get('/',follow_redirects=False).status_code == 307
+    home = client.get('/', follow_redirects=False)
+    assert home.status_code == 200
+    assert '知识库' in home.text
+    assert 'location' not in home.headers
+    assert 'link' not in home.headers
     assert client.get('/.env').status_code == 404
     login=client.post('/api/login',json={'username':'dev01','password':'invalid'})
     assert login.status_code == 401
-    assert '/scene/evidence' in login.headers['link']
+    assert 'link' not in login.headers
     report = client.get('/api/research/runs/'+run,headers=headers).json()
-    assert [e['what']['status'] for e in report['events']] == [307,404,401]
+    assert [e['what']['status'] for e in report['events']] == [200,404,401]
     assert report['decisions'][0]['status'] == 'applied'
     response = client.get(scenario['entry'])
     assert response.json()['content'].endswith('adapted-to-/api/login')
+    credentials = client.post('/api/login', json={'username': 'ops01', 'password': 'ops01-password'}).json()
+    documents = client.get('/api/documents', headers={'Authorization': 'Bearer ' + credentials['token']})
+    assert documents.status_code == 200
+    assert '/scene/evidence' in documents.headers['link']
+    assert documents.headers['cache-control'] == 'private, no-store'
+    other = TestClient(biz.app)
+    assert 'link' not in other.get('/api/documents').headers
+    # An authenticated browser with no applied session revision sees the normal knowledge base.
+    monkeypatch.setenv('RESEARCH_ADAPTIVE_ENABLED', '0')
+    document_headers = {'Authorization': 'Bearer ' + credentials['token']}
+    assert 'link' not in other.get('/api/documents', headers=document_headers).headers
+    link = documents.headers['link'].split('>;', 1)[0][1:]
+    assert client.get(link, headers={'Accept': 'text/html'}).status_code == 200
+    report = client.get('/api/research/runs/'+run, headers=headers).json()
+    assert any(event['what']['kind'] == 'research.lead' for event in report['events'])
     assert 'invalid' not in json.dumps(report)
     assert client.delete('/api/research/active',headers=headers).status_code == 200
     assert client.get('/').status_code == 200

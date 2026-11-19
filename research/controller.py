@@ -38,7 +38,8 @@ Logical event timestamps are sequence numbers, not measured elapsed attack time.
 In AI mode author scene_patch with 1-4 node upserts. Omitted nodes are preserved by the server.
 Update an existing node to link to each new node; all nodes must remain reachable from the
 existing entry node. Never replace the whole graph or rename existing nodes. Maximum total
-nodes is 8: reuse/update nodes when full. Include exact source quotes from the documents.
+nodes is 8: reuse/update nodes when full. Original synthetic content may omit sources.
+When citing a document, use an exact quote.
 For each existing node that you upsert, keep its old outgoing links and add relevant links.
 Text should offer plausible business leads, not tell the visitor they are in a honeynet.
 Infer intent and uncertainties without exposing analyst classifications in visitor-visible text.

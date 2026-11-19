@@ -11,6 +11,7 @@ from replay.engine import Engine
 
 
 def test_mysql_client_auth_read_only_and_version_freeze(demo_seed, tmp_path, monkeypatch):
+    monkeypatch.setenv("HONEYNET_ALERTS_FILE", str(tmp_path / "alerts.sqlite"))
     checkpoint = tmp_path / "world.sqlite"
     monkeypatch.setenv("BUSINESS_STATE_FILE", str(checkpoint))
     engine = Engine(World(enrich_seed(demo_seed)))
@@ -53,6 +54,12 @@ def test_mysql_client_auth_read_only_and_version_freeze(demo_seed, tmp_path, mon
             await server.wait_closed()
 
     asyncio.run(run())
+    from audit.alerts import read_alerts
+
+    kinds = [item["kind"] for item in read_alerts("mysql")["alerts"]]
+    assert kinds.count("connection") == 3
+    assert kinds.count("login_failed") == 1
+    assert kinds.count("login") == 2
 
 
 def test_mysql_verified_canary_proof_is_attributed_without_catalog_access(demo_seed, tmp_path, monkeypatch):
