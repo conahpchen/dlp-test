@@ -134,10 +134,19 @@ def validate_scene(candidate, documents):
     return scene
 
 
+def drafting_sources(documents):
+    """Bound excerpts for drafting. The local validator and reviewer use full sources."""
+    return [dict(document, content=document["content"][:1600]) for document in documents]
+
+
+def prompt_json(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def review_scene(model, scene, documents):
     review = Review.model_validate(model.choose([
         dict(role='system', content=REVIEWER),
-        dict(role='user', content=json.dumps(dict(candidate=scene.model_dump(), sources=documents), ensure_ascii=False))]))
+        dict(role='user', content=prompt_json(dict(candidate=scene.model_dump(), sources=documents)))]))
     if not review.accepted or review.issues:
         raise ValueError('Independent model review rejected scene')
     return review.model_dump()
@@ -145,7 +154,7 @@ def review_scene(model, scene, documents):
 
 def generate_scene(model, documents, goal):
     candidate = model.choose([dict(role='system', content=BUILDER),
-                              dict(role='user', content=json.dumps(dict(goal=goal, sources=documents), ensure_ascii=False))])
+                              dict(role='user', content=prompt_json(dict(goal=goal, sources=drafting_sources(documents))))])
     scene = validate_scene(candidate, documents)
     review = review_scene(model, scene, documents)
     return scene.model_dump(), review

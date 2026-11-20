@@ -341,3 +341,15 @@ def test_legacy_block_policy_cannot_deny_visitor(lab, world):
     with lab.connect() as db:
         db.execute('INSERT INTO policies VALUES (?,?,?,?,?)',(run,'a',1,0,json.dumps({'action':'limit_session','revision':1})))
     assert lab.visit(run,'index','a','127.0.0.1','browser')[0]==200
+
+
+def test_drafting_bounds_sources_and_review_still_reads_full_documents(model):
+    from research.generation import generate_scene
+
+    documents = [{"id": "0", "fact_id": "fact-0", "path": "/kb/report.md",
+                  "content": "研发报表归档说明。" * 400 + "末尾保留的事实"}]
+    generate_scene(model, documents, "整理研发报表说明")
+    draft = json.loads(model.calls[0][-1]["content"])
+    review = json.loads(model.calls[1][-1]["content"])
+    assert len(draft["sources"][0]["content"]) == 1600
+    assert review["sources"] == documents
