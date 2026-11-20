@@ -169,8 +169,28 @@ else:
             assert "name=ssh_inventory" in result, result
             assert re.search(r"username=svc_[a-f0-9]{10}", result)
             assert re.search(r"password=decoy_[a-f0-9]{24}", result)
+            class LogModel:
+                def choose(self, messages):
+                    import json
+
+                    history = json.loads(messages[-1]["content"])["activities"]
+                    assert history[-1] == "inspect_logs"
+                    return {"intent": "log_review", "title": "service_inventory",
+                            "note": "Inventory refresh completed."}
+
+            before = commands(old, "cat /var/log/service-reference.log")
+            assert "No such file" in before
+            subprocess.run(["docker", "cp", f"{container}:/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
+                            str(raw)], check=True, timeout=10)
+            bridge(["--in", str(raw), "--alerts-only", "--canary-state", str(lab.path)])
+            assert process_one(lab, LogModel())
+            result = commands(old, "cat /var/log/service-reference.log")
+            assert "INFO service_inventory: Inventory refresh completed." in result, result
+            assert "password=" not in result
+
             another = connect()
             assert "name=ssh_inventory" not in commands(another, "cat /etc/service-reference.conf")
+            assert "Inventory refresh completed" not in commands(another, "cat /var/log/service-reference.log")
 
         note = next(f for f in engine.world.all_current_cls("data")
                     if f.payload["path"] == "/home/deploy/notes.txt")

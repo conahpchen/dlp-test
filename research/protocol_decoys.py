@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ACTIVITIES = {
-    "ssh": {"inspect_config", "list_files", "read_file"},
+    "ssh": {"inspect_config", "inspect_logs", "list_files", "read_file"},
     "mysql": {"list_catalog", "describe_schema", "inspect_backup"},
     "llm": {"general", "doc", "sensitive"},
 }
@@ -24,7 +24,7 @@ TTL = 600
 class Proposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    intent: Literal["configuration", "catalog", "documentation", "access_review", "uncertain"]
+    intent: Literal["configuration", "catalog", "documentation", "access_review", "log_review", "uncertain"]
     title: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,47}$")
     note: str = Field(min_length=3, max_length=300)
 
@@ -61,6 +61,8 @@ def available(lab, entry, session):
 def ssh_activity(command):
     verb, _, argument = (command or "").strip().lower().partition(" ")
     if verb in {"ls", "find", "cat", "less", "head", "tail", "more", "grep"}:
+        if re.search(r"(?:^|[\s/])(?:logs?|var/log)(?:[\s/]|$)|\.log(?:[\s.]|$)", argument):
+            return "inspect_logs"
         if any(word in argument for word in ("config", ".env", ".conf", ".ini", ".toml", "credential", "passwd", "secret")):
             return "inspect_config"
         return "list_files" if verb in {"ls", "find"} else "read_file"
@@ -109,15 +111,17 @@ def process_one(lab, model):
     try:
         raw = model.choose([
             {"role": "system", "content": "Classify defensive honeypot activity and propose inert synthetic content. "
-             "Return JSON with intent (configuration, catalog, documentation, access_review, or uncertain), "
+             "Return JSON with intent (configuration, catalog, documentation, access_review, log_review, or uncertain), "
              "title (lowercase ASCII identifier), and note (one short plain-text business description). "
              "For SSH, inspect_config means the sensor classified a read or lookup of a configuration path. "
+             "SSH inspect_logs represents looking for service or application logs. Choose log_review for log "
+             "investigation and write the note as a plain sentence without a timestamp, severity prefix, or key-value fields. "
              "Multiple such observations support configuration intent even when interleaved with ordinary file browsing. "
              "Never include commands, credentials, addresses, executable content or external links."},
             {"role": "user", "content": json.dumps({"protocol": entry, "activities": json.loads(history)})},
         ])
         candidate = Proposal.model_validate(raw)
-        if not re.fullmatch(r"[\w\s，。；：、（）,.()_-]+", candidate.note) or any(
+        if not re.fullmatch(r"[\w\s，。；：、（）！？,.:;!?()_%+-]+", candidate.note) or any(
             not character.isprintable() for character in candidate.note
         ):
             raise ValueError("Invalid protocol decoy text")

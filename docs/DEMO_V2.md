@@ -57,7 +57,7 @@ docker build -f deploy/Dockerfile.cowrie-isolated -t dlp-cowrie-isolated:local .
 
 | 入口 | 行为信号 | 经校验后的投放 |
 | --- | --- | --- |
-| SSH | 已连接终端里查看文件、目录或配置 | 当前会话虚拟文件系统内的 `/etc/service-reference.conf` |
+| SSH | 已连接终端里查看文件、目录或配置 | 当前会话虚拟文件系统内的 `/etc/service-reference.conf` 或 `/var/log/service-reference.log` |
 | MySQL | 已认证连接查询模拟目录 | 当前连接后续同类查询的附加合成目录记录 |
 | 模拟 AI API | 已认证聊天请求的活动类别 | 同一凭据和客户端会话标签的后续回复 |
 
@@ -66,6 +66,7 @@ docker build -f deploy/Dockerfile.cowrie-isolated -t dlp-cowrie-isolated:local .
 ### 多入口演示顺序
 
 - **SSH 配置查找**。在同一终端先读普通文件，再查看配置相关路径。模型明确判断为配置查找时，系统在该会话的只读配置文件中附加服务端签发的合成账号和口令占位值。用同一会话重新列目录、读取文件，再用另一终端确认该文件未共享。占位值没有被注册到认证服务。
+- **SSH 日志查找**。在同一终端查阅日志目录或日志文件。模型判断为日志排查后，可以在原会话生成只读日志蜜饵 `/var/log/service-reference.log`；原配置蜜饵仍可读取。
 - **模拟 AI 文档查找**。在已认证的模拟 AI API 会话询问运维文档，等待后台任务，再比较该会话和新会话的回复。
 - **MySQL 目录探索**。先查询原有目录，后台根据行为生成合成条目，再在原连接查询并与新连接对照。
 - **Web 动态模拟服务**。在同一 Web 场景中发起受支持的组件查询，查看 AI 是否生成对应的模拟 HTTP 路由和结构化响应。通过独立会话确认该会话新增的路由未共享。
