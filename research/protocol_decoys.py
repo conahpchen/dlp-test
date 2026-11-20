@@ -61,7 +61,7 @@ def available(lab, entry, session):
 def ssh_activity(command):
     verb, _, argument = (command or "").strip().lower().partition(" ")
     if verb in {"ls", "find", "cat", "less", "head", "tail", "more", "grep"}:
-        if any(word in argument for word in ("config", ".env", "credential", "passwd", "secret")):
+        if any(word in argument for word in ("config", ".env", ".conf", ".ini", ".toml", "credential", "passwd", "secret")):
             return "inspect_config"
         return "list_files" if verb in {"ls", "find"} else "read_file"
     return None
