@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from research.generation import ScenePatch, merge_scene_patch, review_scene
+from research.generation import ScenePatch, drafting_sources, merge_scene_patch, prompt_json, review_scene
 from research.model_input import model_event
 
 
@@ -99,12 +99,12 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                      model=model.name, role='honeynet_interaction', status='pending', previous_revision=revision, attempts=[])
         cursor = db.execute('INSERT INTO decisions(run,session,payload) VALUES (?,?,?)', (run, session, json.dumps(audit)))
         attempt_id = cursor.lastrowid
-    snapshot = dict(documents=plan['documents'], events=[model_event(event, plan) for event in events[-30:]],
+    snapshot = dict(documents=drafting_sources(plan['documents']), events=[model_event(event, plan) for event in events[-30:]],
                     prior_revision=revision,
                     current_scene=policy.get('scene') or plan.get('scene'), mode=plan.get('origin', 'fixture'),
                     prior_goal=policy.get('engagement_goal'), initial_node_ids=[n['id'] for n in plan.get('scene', {}).get('nodes', [])])
-    instructions = SYSTEM + '\nMandatory JSON schema:\n' + json.dumps(EngagementDecision.model_json_schema(), ensure_ascii=False)
-    messages = [dict(role='system', content=instructions), dict(role='user', content=json.dumps(snapshot, ensure_ascii=False))]
+    instructions = SYSTEM + '\nMandatory JSON schema:\n' + prompt_json(EngagementDecision.model_json_schema())
+    messages = [dict(role='system', content=instructions), dict(role='user', content=prompt_json(snapshot))]
     decision, scene = None, None
     # One bounded repair for AI output, within the already reserved decision slot.
     for attempt in range(2 if plan.get('origin') == 'ai' else 1):
@@ -127,7 +127,7 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
             audit['attempts'].append(dict(attempt=attempt + 1, status='rejected', code=code))
             audit.update(status='rejected', error_type=type(exc).__name__, error_code=code)
             feedback = dict(snapshot, repair_feedback=dict(code=code, instruction='Return a corrected decision using a small patch. All original nodes are retained; preserve their links.'))
-            messages = [dict(role='system', content=instructions), dict(role='user', content=json.dumps(feedback, ensure_ascii=False))]
+            messages = [dict(role='system', content=instructions), dict(role='user', content=prompt_json(feedback))]
     with lab.connect() as db:
         current = db.execute('SELECT revision FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
         latest = db.execute('SELECT id FROM decisions WHERE run=? AND session=? ORDER BY id DESC LIMIT 1', (run, session)).fetchone()
