@@ -6,7 +6,7 @@ KINDS = {
     "research.input", "web.request", "research.visit", "research.delivery",
     "research.beacon", "research.invalid_beacon", "research.lead",
 }
-ROUTES = {"index", "interact", "beacon", "service/config", "/api/login", "/api/documents"}
+ROUTES = {"index", "interact", "beacon", "service/config", "/api/login", "/api/documents", "/api/databases", "/api/assets", "/api/tickets"}
 COMPONENTS = {"cache", "database"}
 INTENTS = {
     "部署回滚": "deployment_rollback",

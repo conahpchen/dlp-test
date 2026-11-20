@@ -14,8 +14,12 @@ MAX_PENDING = 128
 LEASE_SECONDS = 240
 
 
+def automatic_enabled():
+    return os.environ.get("RESEARCH_AUTOMATIC_DECOYS") == "1"
+
+
 def enabled():
-    return os.environ.get("RESEARCH_ASYNC_ADAPTATION") == "1"
+    return automatic_enabled() or os.environ.get("RESEARCH_ASYNC_ADAPTATION") == "1"
 
 
 def enqueue(lab, run, session):

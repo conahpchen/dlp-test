@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from research.bindings import HEADER, resolve
 from research.lab import PROBES
-from research.worker import enabled as async_adaptation, enqueue
+from research.worker import automatic_enabled, enabled as async_adaptation, enqueue
 
 
 def install_observer(app, lab_provider, *, allow_model):
@@ -69,7 +69,9 @@ def install_observer(app, lab_provider, *, allow_model):
                 if model:
                     await run_in_threadpool(adapt, lab, run, session, model)
             documents = path == '/api/documents' and request.method == 'GET' and response.status_code == 200
-            if (documents and not allow_model and async_adaptation()
+            business_read = (automatic_enabled() and path in ('/api/databases', '/api/assets', '/api/tickets')
+                             and request.method == 'GET' and response.status_code == 200)
+            if ((documents or business_read) and not allow_model and async_adaptation()
                     and os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1') == '1'):
                 plan = await run_in_threadpool(lab.plan, run)
                 if plan.get('origin') == 'ai':

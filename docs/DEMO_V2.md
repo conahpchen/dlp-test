@@ -48,3 +48,7 @@ docker build -f deploy/Dockerfile.cowrie-isolated -t dlp-cowrie-isolated:local .
 脚本运行启用真实容器的套件、逐字节回放和 10,000 条轨迹。验收记录见 [PROGRESS_V2.md](PROGRESS_V2.md)。
 
 [实时运行页面截图](screenshots/operations-v2-runtime.png)来自启用临时 HTTP、假 AI 和 Dashboard 的本机实例。SSH、MySQL 和两种 L3 服务的证据在各协议的联调记录中。
+
+## 自动生成与投放
+
+需要自动模式时，给 visitor 和 control 同时设置 `RESEARCH_AUTOMATIC_DECOYS=1`，并在 control 配置模型。没有激活场景时，control 在 DWS 就绪后自动生成、复核并激活初始 HTTP 场景。访客从预置 OA 开始。成功读取知识库、数据库目录、资产或工单时触发后台任务，模型根据本会话的近期事件判断意图并提出内容和模拟 HTTP 接口。校验通过后，访客会话可以在再次打开知识库时看到相关线索。日常流程无需手填模板、生成目标或逐次审批。自动模式的范围是现有 HTTP 蜜网内的页面、线索和模拟服务。

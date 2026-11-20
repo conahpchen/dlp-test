@@ -14,7 +14,7 @@ export RESEARCH_STATE_FILE="$state_dir/research.sqlite"
 export HONEYNET_LATENCY_FILE="$state_dir/http.sqlite"
 export HONEYNET_ALERTS_FILE="$state_dir/alerts.sqlite"
 python_bin=${PYTHON_BIN:-.venv/bin/python}
-if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ]; then
+if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ] || [ "${RESEARCH_AUTOMATIC_DECOYS:-0}" = 1 ]; then
   export HONEYNET_VISITOR_HEALTH_PORT="${HONEYNET_VISITOR_HEALTH_PORT:-${HONEYNET_VISITOR_PORT:-8080}}"
 fi
 

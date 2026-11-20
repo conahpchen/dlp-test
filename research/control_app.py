@@ -11,7 +11,7 @@ from business.storage import restore
 from dws.world import World
 from replay.engine import Engine
 from research.api import current_lab, install_routes
-from research.worker import consume, enabled
+from research.worker import automatic_enabled, consume, enabled
 
 
 def checkpoint():
@@ -42,10 +42,37 @@ async def monitor_releases(stop, interval=5):
             pass
 
 
+async def bootstrap_scene(stop, interval=30):
+    """Prepare the shared HTTP scene used by the existing session worker."""
+    from research.model import Model
+
+    run = None
+    while not stop.is_set():
+        try:
+            lab = current_lab()
+            if await asyncio.to_thread(lab.active):
+                return
+            if run is None:
+                engine, _ = await asyncio.to_thread(checkpoint)
+                result = await asyncio.to_thread(lab.create, engine.world, "plain", Model(),
+                                                 automatic=True)
+                run = result["run_id"]
+            await asyncio.to_thread(lab.activate, run, only_if_inactive=True)
+            return
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Automatic scene initialization pending (%s)", type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(_app):
     stop = asyncio.Event()
     tasks = []
+    if automatic_enabled():
+        tasks.append(asyncio.create_task(bootstrap_scene(stop)))
     if enabled():
         tasks.append(asyncio.create_task(consume(current_lab, stop)))
     if os.environ.get("HONEYNET_RELEASE_MONITOR") == "1":
