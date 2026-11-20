@@ -80,12 +80,12 @@ def install_observer(app, lab_provider, *, allow_model):
                 latest = await run_in_threadpool(lab.policy, run, session)
                 scene = latest.get('scene')
                 if scene:
-                    known = {node['id'] for node in scene['nodes']}
-                    lead = next((node for node in latest.get('expected_next_nodes', []) if node in known), None)
+                    titles = {node['id']: node['title'] for node in scene['nodes']}
+                    lead = next((node for node in latest.get('expected_next_nodes', []) if node in titles), None)
                     if lead:
                         await run_in_threadpool(lab.observe, run, session, peer, agent,
                                                dict(kind='research.lead', resource='/api/documents',
-                                                    offered_nodes=[lead], policy_revision=latest['revision']))
+                                                    title=titles[lead], offered_nodes=[lead], policy_revision=latest['revision']))
                         response.headers['Link'] = f'</decoy/{run}/scene/{lead}>; rel="related"'
                         response.headers['Cache-Control'] = 'private, no-store'
         except OverflowError:

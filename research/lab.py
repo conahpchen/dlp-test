@@ -596,7 +596,7 @@ class ResearchLab:
                     if primary_fact:
                         what['fact_id'] = primary_fact
                     what.update(kind='research.delivery', resource='scene/' + node_id,
-                                node_id=node_id, offered_nodes=node['links'],
+                                node_id=node_id, title=node['title'], offered_nodes=node['links'],
                                 service_id=service['id'] if service else None, input_event_id=policy.get('input_event_id'),
                                 source_fact_ids=source_ids,
                                 origin='ai', variant=variant,
@@ -625,7 +625,7 @@ class ResearchLab:
             if doc and not scene:
                 token = (self._issue_lure(db, plan, session, f"documents/{doc['id']}")
                          if variant == 'agent_note' else None)
-                what.update(kind='research.delivery', resource=f"documents/{doc['id']}", fact_id=doc['fact_id'],
+                what.update(kind='research.delivery', resource=f"documents/{doc['id']}", title=doc['path'], fact_id=doc['fact_id'],
                             variant=variant, token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
                 event = self._record(db, plan, session, peer, agent, what)
                 self._remember_exposure(db, token, run, session, doc['fact_id'], event)
