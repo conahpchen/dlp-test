@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import time
@@ -80,7 +81,11 @@ def _publish_ssh(key, expires, payload):
     with NamedTemporaryFile(mode="w", dir=folder, delete=False, encoding="utf-8") as stream:
         path = Path(stream.name)
         try:
-            json.dump(dict(payload, expires=expires), stream, ensure_ascii=False)
+            document = dict(payload, expires=expires)
+            if payload["intent"] == "configuration":
+                document["account"] = "svc_" + secrets.token_hex(5)
+                document["password"] = "decoy_" + secrets.token_hex(12)
+            json.dump(document, stream, ensure_ascii=False)
             stream.flush()
             path.chmod(0o644)
             path.replace(folder / (key + ".json"))
@@ -106,6 +111,8 @@ def process_one(lab, model):
             {"role": "system", "content": "Classify defensive honeypot activity and propose inert synthetic content. "
              "Return JSON with intent (configuration, catalog, documentation, access_review, or uncertain), "
              "title (lowercase ASCII identifier), and note (one short plain-text business description). "
+             "For SSH, inspect_config means the sensor classified a read or lookup of a configuration path. "
+             "Multiple such observations support configuration intent even when interleaved with ordinary file browsing. "
              "Never include commands, credentials, addresses, executable content or external links."},
             {"role": "user", "content": json.dumps({"protocol": entry, "activities": json.loads(history)})},
         ])

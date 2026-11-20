@@ -151,7 +151,12 @@ else:
         if isolated:
             from entries.cowrie.bridge import main as bridge
             from research.protocol_decoys import process_one
-            from tests.test_protocol_decoys import ProtocolModel
+            import re
+
+            class ConfigurationModel:
+                def choose(self, _messages):
+                    return {"intent": "configuration", "title": "ssh_inventory",
+                            "note": "Internal service configuration reference."}
 
             monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "1")
             commands(old, "ls /etc; cat /etc/service-reference.conf")
@@ -159,9 +164,11 @@ else:
             subprocess.run(["docker", "cp", f"{container}:/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
                             str(raw)], check=True, timeout=10)
             assert bridge(["--in", str(raw), "--alerts-only", "--canary-state", str(lab.path)]) == 0
-            assert process_one(lab, ProtocolModel())
+            assert process_one(lab, ConfigurationModel())
             result = commands(old, "ls /etc; cat /etc/service-reference.conf")
             assert "name=ssh_inventory" in result, result
+            assert re.search(r"username=svc_[a-f0-9]{10}", result)
+            assert re.search(r"password=decoy_[a-f0-9]{24}", result)
             another = connect()
             assert "name=ssh_inventory" not in commands(another, "cat /etc/service-reference.conf")
 
