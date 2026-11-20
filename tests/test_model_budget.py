@@ -110,3 +110,54 @@ def test_separate_visitor_queues_classified_activity_and_serves_during_budget_de
     assert client.post(root + "/interact", json={"message": "查看数据库备份"}).status_code == 202
     assert process_one(lab, InputModel())
     assert "database_backup" in client.get(root + "/interact").json()["content"]
+
+
+def test_automatic_decoys_generate_and_deliver_without_template(demo_seed, monkeypatch, tmp_path):
+    import asyncio
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from dws.world import World
+    from replay.engine import Engine
+    from research import control_app
+    from research.api import current_lab, install_routes
+    from research.worker import process_one
+    from tests.test_generative_research import SceneModel
+
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "1")
+    monkeypatch.setenv("RESEARCH_ADAPTIVE_ENABLED", "1")
+    monkeypatch.delenv("HONEYNET_VISITOR_HEALTH_PORT", raising=False)
+    engine = Engine(World(demo_seed))
+    model = SceneModel()
+    monkeypatch.setattr(control_app, "checkpoint", lambda: (engine, {}))
+    monkeypatch.setattr("research.model.Model", lambda: model)
+
+    async def start():
+        await asyncio.wait_for(control_app.bootstrap_scene(asyncio.Event()), timeout=2)
+
+    lab = current_lab()
+    assert lab.active() is None
+    asyncio.run(start())
+    run = lab.active()
+    assert lab.plan(run)["origin"] == "ai"
+    assert "template" not in lab.plan(run)
+    asyncio.run(start())
+    assert lab.active() == run
+    assert len(model.calls) == 2
+
+    visitor = FastAPI()
+    visitor.get("/")(lambda: {"page": "OA"})
+    visitor.get("/api/documents")(lambda: [{"title": "研发报表"}])
+    install_routes(visitor, lambda: engine, surface="visitor")
+    client = TestClient(visitor)
+    assert client.get("/").json() == {"page": "OA"}
+    assert "link" not in client.get("/api/documents").headers
+    assert len(model.calls) == 2
+    assert process_one(lab, model)
+    response = client.get("/api/documents")
+    expected_link = f"/decoy/{run}/scene/evidence"
+    assert response.headers["link"] == f'<{expected_link}>; rel="related"'
+    assert client.get(expected_link).status_code == 200
+    assert lab.report(run)["decisions"][0]["decision"]["intent"] == "exploring service context"

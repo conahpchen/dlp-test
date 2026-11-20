@@ -1,13 +1,13 @@
 # AI 蜜网部署实施手册
 
-本手册用于 Linux 上的临时部署、演示与目标环境复验。参考验证对应实现提交 `2d7647e`。实际部署时记录采用的完整提交 SHA、镜像摘要、部署人和时间。生产外部入口按目标网络配置逐项验收。
+本手册用于 Linux 上的临时部署、演示与目标环境复验。部署前切换到本次要验证的 Git 提交，记录完整提交 SHA、镜像摘要、部署人和时间。生产外部入口按目标网络配置逐项验收。
 
 ## 1. 准备环境
 
 准备 Linux、Python 3.12、Docker、OpenSSH、OpenSSL 和 libseccomp2。浏览器演示可使用 Chromium。部署前确认运行账号、Docker 权限、持久化路径、端口占用及存储容量。在已有部署上升级前，先停止写入并保存状态和当前配置。
 
 ```sh
-git clone --branch codex/v2-delivery https://github.com/conahpchen/dlp-test.git
+git clone https://github.com/conahpchen/dlp-test.git
 cd dlp-test
 git rev-parse HEAD
 python3.12 -m venv .venv

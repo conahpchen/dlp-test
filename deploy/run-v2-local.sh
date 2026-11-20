@@ -14,7 +14,7 @@ export RESEARCH_STATE_FILE="$state_dir/research.sqlite"
 export HONEYNET_LATENCY_FILE="$state_dir/http.sqlite"
 export HONEYNET_ALERTS_FILE="$state_dir/alerts.sqlite"
 python_bin=${PYTHON_BIN:-.venv/bin/python}
-if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ]; then
+if [ "${HONEYNET_RELEASE_MONITOR:-0}" = 1 ] || [ "${RESEARCH_AUTOMATIC_DECOYS:-0}" = 1 ]; then
   export HONEYNET_VISITOR_HEALTH_PORT="${HONEYNET_VISITOR_HEALTH_PORT:-${HONEYNET_VISITOR_PORT:-8080}}"
 fi
 
@@ -67,6 +67,7 @@ case "${1:-}" in
     exec docker run --rm --name "${HONEYNET_COWRIE_CONTAINER:-dlp-cowrie-v2}" --cap-drop ALL --security-opt no-new-privileges \
       -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
       -e "HONEYNET_COWRIE_PROJECTION=/projection/${projection##*/}" \
+      -e "RESEARCH_AUTOMATIC_DECOYS=${RESEARCH_AUTOMATIC_DECOYS:-0}" \
       -e "COWRIE_HONEYPOT_HOSTNAME=${HONEYNET_COWRIE_HOST:-web01}" \
       --mount "type=bind,source=$projection_dir,target=/projection,readonly" \
       "${HONEYNET_COWRIE_IMAGE:-$image}"

@@ -12,6 +12,8 @@ article{background:white;padding:1rem;margin:1rem 0;border-radius:.5rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem}
 dl div{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin:.35rem 0}
 dd{margin:0;overflow-wrap:anywhere}
+.table-scroll{overflow-x:auto}
+tr:target{background:#d9eeeb}
 </style>
 <header><a href="/">返回运行总览</a></header>
 <main>
@@ -23,10 +25,13 @@ dd{margin:0;overflow-wrap:anywhere}
 <h2>Agent 登记</h2><div id="registrations"></div>
 <h2>Canary 命中</h2><div id="canaries"></div>
 <h2>Web 事件时间线</h2>
-<table>
-<thead><tr><th>逻辑时钟</th><th>会话</th><th>事件类型</th><th>DWS 版本</th></tr></thead>
+<label>筛选会话 <select id="sessions"><option value="">全部会话</option></select></label>
+<p>下方 AI 生成记录会链接到它参考的事件。序号用于表示先后。</p>
+<div class="table-scroll"><table>
+<thead><tr><th>逻辑序号</th><th>会话</th><th>发生了什么</th><th>请求或交付内容</th><th>HTTP 状态</th><th>DWS 版本</th></tr></thead>
 <tbody id="timeline"></tbody>
-</table>
+</table></div>
+<h2>AI 生成记录</h2><div id="generation"></div>
 </main>
 <script>
 const runs = document.querySelector('#runs');
@@ -111,12 +116,78 @@ function renderRelease(run, release) {
   }
   releasePanel.replaceChildren(card);
 }
+const sessions = document.querySelector('#sessions');
+const generation = document.querySelector('#generation');
+let selectedEvidence;
+const eventNames = {
+  'web.request':'访问 Web', 'research.visit':'访问场景', 'research.delivery':'交付内容',
+  'research.lead':'提供相关资料链接', 'research.input':'提交交互请求',
+  'research.beacon':'核验链接命中', 'research.invalid_beacon':'核验链接未通过'
+};
+const resources = {
+  '/':'OA 首页', '/ui':'OA 首页', '/api/documents':'知识库', '/api/tickets':'工单列表',
+  '/api/databases':'数据库目录', '/api/assets':'资产列表', '/api/login':'登录',
+  'unmatched':'未匹配已知路由', 'beacon':'核验链接'
+};
+const decisionNames = {applied:'已应用到会话', rejected:'未通过校验', stale:'已过期', pending:'处理中'};
+function renderTimeline() {
+  if (!selectedEvidence) return;
+  const filter = sessions.value;
+  const matches = item => !filter || item.session === filter;
+  const timelineRows = selectedEvidence.timeline.filter(matches);
+  const positions = new Map(selectedEvidence.timeline.map((event, index) => [event.event_id, index+1]));
+  timeline.replaceChildren();
+  for (const event of timelineRows) {
+    const row = document.createElement('tr');
+    row.id = 'event-' + event.event_id;
+    const label = resources[event.resource];
+    const target = [event.method, event.title || label, event.resource].filter(Boolean).join(' · ');
+    const values = ['#'+positions.get(event.event_id), event.session, eventNames[event.kind] || event.kind,
+      target || '未记录', event.status ?? '—', event.world_version ?? '—'];
+    for (const value of values) {
+      const cell = document.createElement('td');
+      cell.textContent = value;
+      row.append(cell);
+    }
+    timeline.append(row);
+  }
+  generation.replaceChildren();
+  for (const record of selectedEvidence.generation.filter(matches)) {
+    const item = document.createElement('article');
+    item.append(group(decisionNames[record.status] || record.status, {
+      '会话': record.session, '推测意图': record.intent || '未记录',
+      '提议新增或更新页面': record.nodes.map(node => node.title + '（' + node.id + '）').join('、') || '无',
+      '提议模拟接口': record.services.map(service => service.method + ' ' + service.path).join('、') || '无'
+    }));
+    const evidence = document.createElement('p');
+    evidence.append('依据事件：');
+    for (const id of record.evidence_event_ids) {
+      if (!positions.has(id)) continue;
+      const link = document.createElement('a');
+      link.href = '#event-' + id;
+      link.textContent = '#' + positions.get(id);
+      evidence.append(link, ' ');
+    }
+    item.append(evidence);
+    generation.append(item);
+  }
+  if (!timelineRows.length) {
+    const row = timeline.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 6;
+    cell.textContent = '暂无事件';
+  }
+  if (!generation.childElementCount) generation.textContent = '这个范围内暂无 AI 生成记录';
+}
+sessions.onchange = renderTimeline;
 async function refresh() {
   try {
     const selected = runs.value;
     registrations.replaceChildren();
     canaries.replaceChildren();
+    selectedEvidence = null;
     timeline.replaceChildren();
+    generation.replaceChildren();
     releasePanel.replaceChildren();
     if (!selected) return;
     const evidence = await get('/api/evidence/runs/' + encodeURIComponent(selected));
@@ -132,15 +203,14 @@ async function refresh() {
                   group('行为推断',row.inferred));
       registrations.append(item);
     }
-    for (const event of evidence.timeline) {
-      const row = document.createElement('tr');
-      for (const key of ['logical_time','session','kind','world_version']) {
-        const cell = document.createElement('td');
-        cell.textContent = event[key];
-        row.append(cell);
-      }
-      timeline.append(row);
+    const previousSession = sessions.value;
+    sessions.replaceChildren(new Option('全部会话', ''));
+    for (const session of new Set([...evidence.timeline, ...evidence.generation].map(row => row.session))) {
+      sessions.add(new Option(session, session));
     }
+    if (Array.from(sessions.options).some(option => option.value === previousSession)) sessions.value = previousSession;
+    selectedEvidence = evidence;
+    renderTimeline();
     for (const row of evidence.canary_uses) {
       const {history,use_id,...fields} = row;
       const item = document.createElement('article');

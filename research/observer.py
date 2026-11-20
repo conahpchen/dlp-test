@@ -10,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from research.bindings import HEADER, resolve
 from research.lab import PROBES
-from research.worker import enabled as async_adaptation, enqueue
+from research.worker import automatic_enabled, enabled as async_adaptation, enqueue
 
 
 def install_observer(app, lab_provider, *, allow_model):
@@ -69,7 +69,9 @@ def install_observer(app, lab_provider, *, allow_model):
                 if model:
                     await run_in_threadpool(adapt, lab, run, session, model)
             documents = path == '/api/documents' and request.method == 'GET' and response.status_code == 200
-            if (documents and not allow_model and async_adaptation()
+            business_read = (automatic_enabled() and path in ('/api/databases', '/api/assets', '/api/tickets')
+                             and request.method == 'GET' and response.status_code == 200)
+            if ((documents or business_read) and not allow_model and async_adaptation()
                     and os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1') == '1'):
                 plan = await run_in_threadpool(lab.plan, run)
                 if plan.get('origin') == 'ai':
@@ -78,12 +80,12 @@ def install_observer(app, lab_provider, *, allow_model):
                 latest = await run_in_threadpool(lab.policy, run, session)
                 scene = latest.get('scene')
                 if scene:
-                    known = {node['id'] for node in scene['nodes']}
-                    lead = next((node for node in latest.get('expected_next_nodes', []) if node in known), None)
+                    titles = {node['id']: node['title'] for node in scene['nodes']}
+                    lead = next((node for node in latest.get('expected_next_nodes', []) if node in titles), None)
                     if lead:
                         await run_in_threadpool(lab.observe, run, session, peer, agent,
                                                dict(kind='research.lead', resource='/api/documents',
-                                                    offered_nodes=[lead], policy_revision=latest['revision']))
+                                                    title=titles[lead], offered_nodes=[lead], policy_revision=latest['revision']))
                         response.headers['Link'] = f'</decoy/{run}/scene/{lead}>; rel="related"'
                         response.headers['Cache-Control'] = 'private, no-store'
         except OverflowError:

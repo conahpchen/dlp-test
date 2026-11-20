@@ -71,6 +71,7 @@ def test_real_cowrie_keeps_old_dws_projection(demo_seed, tmp_path, monkeypatch):
         "-p", "127.0.0.1::2222",
         "-e", "HONEYNET_COWRIE_PROJECTION=/projection/world.sqlite",
         "-e", "COWRIE_HONEYPOT_HOSTNAME=web01",
+        "-e", "RESEARCH_AUTOMATIC_DECOYS=1",
         "--mount", f"type=bind,source={hook},target=/dws-hook,readonly",
         "--mount", f"type=bind,source={directory},target=/projection,readonly",
         "--mount", f"type=bind,source={userdb},target=/cowrie/cowrie-git/etc/userdb.txt,readonly",
@@ -147,6 +148,50 @@ else:
         assert "notes.txt" in result and "rotate ssh keys" in result, result
         result = commands(old, "touch /home/deploy/session-only; ls /home/deploy")
         assert any("session-only" in line and "touch " not in line for line in result.splitlines()), result
+        if isolated:
+            from entries.cowrie.bridge import main as bridge
+            from research.protocol_decoys import process_one
+            import re
+
+            class ConfigurationModel:
+                def choose(self, _messages):
+                    return {"intent": "configuration", "title": "ssh_inventory",
+                            "note": "Internal service configuration reference."}
+
+            monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "1")
+            commands(old, "ls /etc; cat /etc/service-reference.conf")
+            raw = tmp_path / "cowrie.json"
+            subprocess.run(["docker", "cp", f"{container}:/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
+                            str(raw)], check=True, timeout=10)
+            assert bridge(["--in", str(raw), "--alerts-only", "--canary-state", str(lab.path)]) == 0
+            assert process_one(lab, ConfigurationModel())
+            result = commands(old, "ls /etc; cat /etc/service-reference.conf")
+            assert "name=ssh_inventory" in result, result
+            assert re.search(r"username=svc_[a-f0-9]{10}", result)
+            assert re.search(r"password=decoy_[a-f0-9]{24}", result)
+            class LogModel:
+                def choose(self, messages):
+                    import json
+
+                    history = json.loads(messages[-1]["content"])["activities"]
+                    assert history[-1] == "inspect_logs"
+                    return {"intent": "log_review", "title": "service_inventory",
+                            "note": "Inventory refresh completed."}
+
+            before = commands(old, "cat /var/log/service-reference.log")
+            assert "No such file" in before
+            subprocess.run(["docker", "cp", f"{container}:/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
+                            str(raw)], check=True, timeout=10)
+            bridge(["--in", str(raw), "--alerts-only", "--canary-state", str(lab.path)])
+            assert process_one(lab, LogModel())
+            result = commands(old, "cat /var/log/service-reference.log")
+            assert "INFO service_inventory: Inventory refresh completed." in result, result
+            assert "password=" not in result
+
+            another = connect()
+            assert "name=ssh_inventory" not in commands(another, "cat /etc/service-reference.conf")
+            assert "Inventory refresh completed" not in commands(another, "cat /var/log/service-reference.log")
+
         note = next(f for f in engine.world.all_current_cls("data")
                     if f.payload["path"] == "/home/deploy/notes.txt")
         ai_host = next(row for row in engine.world.all_current_cls("host")

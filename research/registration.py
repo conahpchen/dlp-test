@@ -102,6 +102,9 @@ def evidence(lab, run):
         events = [json.loads(row[0]) for row in db.execute(
             "SELECT payload FROM events WHERE run=? ORDER BY id", (run,),
         )]
+        decisions = [json.loads(row[0]) for row in db.execute(
+            "SELECT payload FROM decisions WHERE run=? ORDER BY id", (run,),
+        )]
     profiles = {row["session"]: row for row in analyze(events)}
     evidence_rows = []
     for session, registration_id, claim, recorded_at in rows:
@@ -120,12 +123,48 @@ def evidence(lab, run):
                 "confidence": profile.get("confidence", "undetermined"),
             },
         })
-    timeline = [{
-        "event_id": event["event_id"],
-        "entry": event["entry"],
-        "session": event["session"],
-        "kind": event["what"]["kind"],
-        "world_version": event["dws_version"],
-        "logical_time": event["ts_hlc"],
-    } for event in events]
-    return {"registrations": evidence_rows, "timeline": timeline}
+    initial_titles = {f"documents/{doc['id']}": doc["path"] for doc in plan["documents"]}
+    initial_titles.update({f"scene/{node['id']}": node["title"]
+                           for node in (plan.get("scene") or {}).get("nodes", [])})
+    graphs = [plan.get("scene") or {}]
+    graphs.extend((record.get("decision") or {}).get("scene_patch") or {} for record in decisions)
+    known_resources = {"index", "interact", *initial_titles}
+    for graph in graphs:
+        known_resources.update(f"scene/{node['id']}" for node in graph.get("nodes", []))
+        known_resources.update(f"service/{service['path']}" for service in graph.get("services", []))
+    timeline = []
+    for event in events:
+        what = event["what"]
+        resource = what.get("resource")
+        if what["kind"] == "research.input" and resource not in known_resources:
+            resource = "未识别的场景路径"
+        title = what.get("title")
+        if not title and what["kind"] == "research.delivery" and not what.get("policy_revision"):
+            title = initial_titles.get(resource)
+        timeline.append({
+            "event_id": event["event_id"],
+            "entry": event["entry"],
+            "session": event["session"],
+            "kind": what["kind"],
+            "world_version": event["dws_version"],
+            "logical_time": event["ts_hlc"],
+            "resource": resource,
+            "method": what.get("method"),
+            "status": what.get("status"),
+            "title": title,
+        })
+    generation = []
+    for record in decisions:
+        decision = record.get("decision") or {}
+        patch = decision.get("scene_patch") or {}
+        generation.append({
+            "session": record["session"],
+            "status": record["status"],
+            "intent": decision.get("intent"),
+            "nodes": [{"id": node["id"], "title": node["title"]} for node in patch.get("nodes", [])],
+            "services": [{"method": service["method"], "path": service["path"]}
+                         for service in patch.get("services", [])],
+            "evidence_event_ids": decision.get("evidence_event_ids") or record.get("evidence_window", []),
+            "error_code": record.get("error_code"),
+        })
+    return {"registrations": evidence_rows, "timeline": timeline, "generation": generation}

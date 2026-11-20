@@ -26,6 +26,10 @@ class ResearchLab:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript('''
+            CREATE TABLE IF NOT EXISTS protocol_decoys (
+                key TEXT PRIMARY KEY, entry TEXT NOT NULL, history TEXT NOT NULL, expires INTEGER NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1, processed INTEGER NOT NULL DEFAULT 0,
+                leased_until INTEGER NOT NULL DEFAULT 0, payload TEXT);
             CREATE TABLE IF NOT EXISTS template_revisions (
                 template_id TEXT NOT NULL, revision INTEGER NOT NULL, name TEXT NOT NULL,
                 variant TEXT NOT NULL, goal TEXT NOT NULL,
@@ -150,7 +154,7 @@ class ResearchLab:
             db.execute('INSERT INTO template_revisions VALUES (?,?,?,?,?)', row)
         return self._template(row)
 
-    def create(self, world, variant, model=None, goal=None, template=None):
+    def create(self, world, variant, model=None, goal=None, template=None, *, automatic=False):
         if variant not in VARIANTS:
             raise ValueError('Unsupported variant')
         version = world.meta['world_version']
@@ -173,14 +177,19 @@ class ResearchLab:
         if model is not None:
             from research.generation import generate_scene
 
-            scene, review = generate_scene(model, plan['documents'], goal or '生成有业务关联的知识库与运维排查线索，观察访客探索及核验行为')
+            draft_goal = goal or '生成有业务关联的知识库与运维排查线索，观察访客探索及核验行为'
+            if automatic:
+                draft_goal += '。仅使用内置 Web 页面和模拟 HTTP 响应，capability_requests 必须为空。'
+            scene, review = generate_scene(model, plan['documents'], draft_goal)
+            if automatic and scene.get('capability_requests'):
+                raise ValueError('Automatic scenes must use embedded HTTP capabilities')
             plan.update(origin='ai', scene=scene, generation=dict(model=model.name, review=review, goal=goal))
         with self.connect() as db:
             db.execute('INSERT INTO runs VALUES (?, ?)', (run_id, json.dumps(plan)))
         return dict(run_id=run_id, version=1, variant=variant,
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
 
-    def activate(self, run, *, approve_isolated=False):
+    def activate(self, run, *, approve_isolated=False, only_if_inactive=False):
         from research.service_planner import ReleasePreparationError, prepare_release
 
         with self.connect() as db:
@@ -188,6 +197,8 @@ class ResearchLab:
             if plan.get('origin') != 'ai':
                 raise ValueError('Only model-generated scenes can be activated')
             previous = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
+            if only_if_inactive and previous:
+                return dict(active_run=previous[0], entry=f'/decoy/{previous[0]}/index')
             revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
             active_manifest = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
         if previous and previous[0] == run and active_manifest and json.loads(active_manifest[0])["new_processes"]:
@@ -585,7 +596,7 @@ class ResearchLab:
                     if primary_fact:
                         what['fact_id'] = primary_fact
                     what.update(kind='research.delivery', resource='scene/' + node_id,
-                                node_id=node_id, offered_nodes=node['links'],
+                                node_id=node_id, title=node['title'], offered_nodes=node['links'],
                                 service_id=service['id'] if service else None, input_event_id=policy.get('input_event_id'),
                                 source_fact_ids=source_ids,
                                 origin='ai', variant=variant,
@@ -614,7 +625,7 @@ class ResearchLab:
             if doc and not scene:
                 token = (self._issue_lure(db, plan, session, f"documents/{doc['id']}")
                          if variant == 'agent_note' else None)
-                what.update(kind='research.delivery', resource=f"documents/{doc['id']}", fact_id=doc['fact_id'],
+                what.update(kind='research.delivery', resource=f"documents/{doc['id']}", title=doc['path'], fact_id=doc['fact_id'],
                             variant=variant, token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
                 event = self._record(db, plan, session, peer, agent, what)
                 self._remember_exposure(db, token, run, session, doc['fact_id'], event)

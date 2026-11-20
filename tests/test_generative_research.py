@@ -169,6 +169,21 @@ def test_adaptive_model_rewrites_scene_not_just_order(lab, world, model):
     assert other['content'].endswith('initial')
     assert lab.plan(run)['scene']['nodes'][0]['body'].endswith('initial')
     assert lab.report(run)['model_assessments'][0]['intent'] == 'exploring service context'
+    from research.registration import evidence
+
+    lab.observe(run, "a", "127.0.0.1", "browser", {
+        "kind": "research.input", "resource": "beacon/private-example", "method": "POST",
+    })
+    details = evidence(lab, run)
+    assert details["timeline"][0]["title"] == "变更排查入口"
+    assert details["generation"][0]["intent"] == "exploring service context"
+    assert details["generation"][0]["nodes"][0]["title"] == "变更排查入口"
+    assert details["generation"][0]["evidence_event_ids"][0] in {
+        event["event_id"] for event in details["timeline"]
+    }
+    assert details["timeline"][-1]["resource"] == "未识别的场景路径"
+    assert "private-example" not in json.dumps(details)
+
 
 
 def test_active_scene_observes_real_business_traffic(client, monkeypatch):

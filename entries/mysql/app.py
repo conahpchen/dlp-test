@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import sqlite3
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,6 +130,22 @@ class CatalogSession(Session):
             raise MysqlError("Statement is outside the supported catalog subset")
         statement = " ".join(sql.casefold().split()).removesuffix(";")
         if statement == QUERY:
+            from research.worker import automatic_enabled
+
+            if self.bindings and automatic_enabled():
+                from research.protocol_decoys import available, observe
+
+                if not hasattr(self, "decoy_session"):
+                    self.decoy_session = ulid_now()
+                try:
+                    decoy = await asyncio.to_thread(available, self.bindings, "mysql", self.decoy_session)
+                    await asyncio.to_thread(observe, self.bindings, "mysql", self.decoy_session, "list_catalog")
+                    if decoy:
+                        name = "reference_" + decoy["title"].replace("-", "_")
+                        if all(row[0] != name for row in self.rows):
+                            return [*self.rows, (name, "MySQL")], ["name", "engine"]
+                except sqlite3.Error:
+                    pass
             return self.rows, ["name", "engine"]
         if statement == "select 1":
             return [(1,)], ["1"]

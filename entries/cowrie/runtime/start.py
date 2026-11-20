@@ -27,6 +27,7 @@ def read_projection(projection):
 
 def install(projection):
     from cowrie.shell import fs
+    from cowrie.shell.protocol import HoneyPotBaseProtocol
     from cowrie.ssh.session import HoneyPotSSHSession
     from twisted.conch.ssh.common import getNS
 
@@ -85,6 +86,45 @@ def install(projection):
     HoneyPotSSHSession.request_env = binding_env
     HoneyPotSSHSession.request_shell = with_binding(HoneyPotSSHSession.request_shell)
     HoneyPotSSHSession.request_exec = with_binding(HoneyPotSSHSession.request_exec)
+
+    if os.environ.get("RESEARCH_AUTOMATIC_DECOYS") == "1":
+        original_call = HoneyPotBaseProtocol.call_command
+
+        def call_command(protocol, pp, cmd, *args):
+            delivered = getattr(protocol, "_dws_decoys_delivered", set())
+            if len(delivered) < 2:
+                try:
+                    session = protocol.getProtoTransport().transportId
+                    key = hashlib.sha256(f"ssh:{session}".encode()).hexdigest()
+                    path = Path(projection).parent / "session-decoys" / (key + ".json")
+                    with path.open("rb") as stream:
+                        decoy = json.loads(stream.read(4096))
+                    title, note = decoy["title"], decoy["note"]
+                    configuration = decoy.get("intent") == "configuration"
+                    is_log = decoy.get("intent") == "log_review"
+                    destination = "/var/log/service-reference.log" if is_log else "/etc/service-reference.conf"
+                    account, password = decoy.get("account", ""), decoy.get("password", "")
+                    if configuration and not (re.fullmatch(r"svc_[a-f0-9]{10}", account)
+                                              and re.fullmatch(r"decoy_[a-f0-9]{24}", password)):
+                        return original_call(protocol, pp, cmd, *args)
+                    filesystem = protocol.fs
+                    if (decoy["expires"] > time() and re.fullmatch(r"[a-z][a-z0-9_-]{2,47}", title)
+                            and len(note) <= 300 and note.isprintable()
+                            and destination not in delivered and not filesystem.exists(destination)):
+                        content = f"# {note}\n[service]\nname={title}\nmode=read_only\n".encode()
+                        if is_log:
+                            content = f"INFO {title}: {note}\n".encode()
+                        if configuration:
+                            content += f"\n[authentication]\nusername={account}\npassword={password}\n".encode()
+                        filesystem.mkfile(destination, 0, 0, len(content), 0o100444)
+                        filesystem.getfile(destination)[fs.A_CONTENTS] = content
+                        delivered.add(destination)
+                        protocol._dws_decoys_delivered = delivered
+                except (AttributeError, OSError, TypeError, ValueError, KeyError):
+                    pass
+            return original_call(protocol, pp, cmd, *args)
+
+        HoneyPotBaseProtocol.call_command = call_command
 
     initialize = fs.HoneyPotFilesystem.__init__
 
