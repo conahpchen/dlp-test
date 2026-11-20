@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -539,6 +540,20 @@ async def v1_chat(request: Request):
             401,
         )
     chat = resp["chat"]
+    from research.worker import automatic_enabled
+
+    if automatic_enabled():
+        from research.api import current_lab
+        from research.protocol_decoys import available, observe
+
+        lab = current_lab()
+        try:
+            decoy = await run_in_threadpool(available, lab, "llm", session)
+            await run_in_threadpool(observe, lab, "llm", session, target_class)
+            if decoy:
+                chat = dict(chat, content=chat["content"] + "\n\n" + decoy["note"])
+        except sqlite3.Error:
+            pass
     prompt_tokens = sum(len(str(m.get("content") or "")) // 4 + 1 for m in messages)
     return JSONResponse(
         {

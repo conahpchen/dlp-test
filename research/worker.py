@@ -75,9 +75,18 @@ def result_status(lab, run, session):
 async def consume(lab_provider, stop):
     from research.model import Model
 
+    from research.protocol_decoys import process_one as process_protocol
+
+    def cycle():
+        lab = lab_provider()
+        model = Model()
+        if automatic_enabled():
+            process_protocol(lab, model)
+        process_one(lab, model)
+
     while not stop.is_set():
         try:
-            await asyncio.to_thread(lambda: process_one(lab_provider(), Model()))
+            await asyncio.to_thread(cycle)
         except Exception as exc:
             logging.getLogger(__name__).warning("Model queue unavailable (%s)", type(exc).__name__)
         try:

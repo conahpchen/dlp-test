@@ -26,6 +26,10 @@ class ResearchLab:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript('''
+            CREATE TABLE IF NOT EXISTS protocol_decoys (
+                key TEXT PRIMARY KEY, entry TEXT NOT NULL, history TEXT NOT NULL, expires INTEGER NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1, processed INTEGER NOT NULL DEFAULT 0,
+                leased_until INTEGER NOT NULL DEFAULT 0, payload TEXT);
             CREATE TABLE IF NOT EXISTS template_revisions (
                 template_id TEXT NOT NULL, revision INTEGER NOT NULL, name TEXT NOT NULL,
                 variant TEXT NOT NULL, goal TEXT NOT NULL,

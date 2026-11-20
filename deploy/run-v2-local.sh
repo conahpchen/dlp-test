@@ -67,6 +67,7 @@ case "${1:-}" in
     exec docker run --rm --name "${HONEYNET_COWRIE_CONTAINER:-dlp-cowrie-v2}" --cap-drop ALL --security-opt no-new-privileges \
       -p "127.0.0.1:${HONEYNET_COWRIE_PORT:-2222}:2222" \
       -e "HONEYNET_COWRIE_PROJECTION=/projection/${projection##*/}" \
+      -e "RESEARCH_AUTOMATIC_DECOYS=${RESEARCH_AUTOMATIC_DECOYS:-0}" \
       -e "COWRIE_HONEYPOT_HOSTNAME=${HONEYNET_COWRIE_HOST:-web01}" \
       --mount "type=bind,source=$projection_dir,target=/projection,readonly" \
       "${HONEYNET_COWRIE_IMAGE:-$image}"

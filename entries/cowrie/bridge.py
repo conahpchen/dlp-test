@@ -161,6 +161,16 @@ def main(argv=None) -> int:
                     lab.observe_lure_use(password, "ssh", f"{args.node}/{session}")
                 except sqlite3.Error:
                     print("bridge: Canary evidence store unavailable", file=sys.stderr)
+        if lab and event["what"]["kind"] == "ssh.command":
+            from research.protocol_decoys import observe, ssh_activity
+            from research.worker import automatic_enabled
+
+            session = record.get("session")
+            if automatic_enabled() and isinstance(session, str) and session:
+                try:
+                    observe(lab, "ssh", session, ssh_activity(record.get("input")))
+                except sqlite3.Error:
+                    print("bridge: protocol observation unavailable", file=sys.stderr)
         counter += 1
         payload = json.dumps(event, ensure_ascii=False, sort_keys=True)
         if args.out:
