@@ -16,7 +16,12 @@ from research.protocol_decoys import process_one
 
 class ProtocolModel:
     def choose(self, messages):
-        entry = json.loads(messages[-1]["content"])["protocol"]
+        observation = json.loads(messages[-1]["content"])
+        entry = observation["protocol"]
+        if entry == "llm":
+            assert observation == {"protocol": "llm", "activities": ["doc"]}
+            assert "doc means a request for internal documentation" in messages[0]["content"]
+            assert "介绍运维文档" not in json.dumps(messages, ensure_ascii=False)
         return {"intent": "catalog", "title": entry + "_inventory",
                 "note": "Inventory reference for internal operations."}
 
@@ -29,8 +34,8 @@ def test_fake_api_adapts_authenticated_session_only(tmp_path, monkeypatch):
     client = TestClient(business.app)
     body = {"model": "corp-llm-7b", "messages": [{"role": "user", "content": "介绍运维文档"}]}
 
-    def request(label):
-        response = client.post("/v1/chat/completions", json=body, headers={
+    def request(label, actor=client):
+        response = actor.post("/v1/chat/completions", json=body, headers={
             "Authorization": "Bearer sk-demo-internal-2026", "X-Session": label,
         })
         assert response.status_code == 200
@@ -40,6 +45,8 @@ def test_fake_api_adapts_authenticated_session_only(tmp_path, monkeypatch):
     assert process_one(current_lab(), ProtocolModel())
     assert "Inventory reference" in request("first")
     assert "Inventory reference" not in request("second")
+    with TestClient(business.app) as another_client:
+        assert "Inventory reference" not in request("first", another_client)
 
 
 def test_mysql_adapts_catalog_for_one_connection(demo_seed, tmp_path, monkeypatch):

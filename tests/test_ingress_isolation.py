@@ -105,3 +105,42 @@ def test_mysql_listener_replies_under_linux_ingress_policy(demo_seed, tmp_path, 
         with connect() as db, db.cursor() as cursor:
             cursor.execute("SELECT 1")
             assert cursor.fetchone() == (1,)
+
+
+def test_owned_ingress_limits_requests_and_closes_mysql_session(demo_seed, tmp_path, monkeypatch):
+    import pymysql
+
+    from audit.alerts import read_alerts
+    from business.enterprise import enrich_seed
+    from business.storage import persist
+    from dws.world import World
+    from replay.engine import Engine
+
+    checkpoint = tmp_path / "world.sqlite"
+    research = tmp_path / "research.sqlite"
+    monkeypatch.setenv("BUSINESS_STATE_FILE", str(checkpoint))
+    monkeypatch.setenv("HONEYNET_ALERTS_FILE", str(tmp_path / "alerts.sqlite"))
+    monkeypatch.setenv("HONEYNET_MYSQL_QUERIES_PER_10S", "6")
+    persist(Engine(World(enrich_seed(demo_seed))), [], [])
+    env = dict(os.environ, HONEYNET_VISITOR_ONLY="1", HONEYNET_PG_DSN="",
+               RESEARCH_STATE_FILE=str(research), HONEYNET_WEB_REQUESTS_PER_10S="2",
+               HONEYNET_LLM_REQUESTS_PER_10S="2")
+    with listener("business.app:app", env, ingress_only=True) as web:
+        for route in ("/v1/models", "/"):
+            codes = [web.get(route).status_code for _ in range(4)]
+            assert 200 in codes and 429 in codes
+            closed = next(response for _ in range(4) if (response := web.get(route)).status_code == 429)
+            assert closed.headers["connection"] == "close" and closed.headers["retry-after"] == "10"
+        assert web.get("/healthz").status_code == 200
+    with mysql_listener(checkpoint, research) as connect:
+        with connect() as db, db.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            assert cursor.fetchone() == (1,)
+            with pytest.raises(pymysql.OperationalError):
+                for _ in range(14):
+                    cursor.execute("SELECT 1")
+        with connect() as other, other.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            assert cursor.fetchone() == (1,)
+    observed = {(row["source"], row["kind"]) for row in read_alerts()["alerts"]}
+    assert {("web", "rate_limited"), ("llm", "rate_limited"), ("mysql", "session_ended")} <= observed

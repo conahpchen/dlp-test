@@ -48,7 +48,7 @@ def restore(engine, *, recover=False):
     return state
 
 
-def persist(engine, audit, events):
+def persist(engine, audit, events, *, archived=()):
     path = location()
     if not path:
         return
@@ -79,7 +79,7 @@ def persist(engine, audit, events):
             from entries.cowrie.projection import prepare
 
             snapshot = prepare(engine.world, os.environ.get("HONEYNET_COWRIE_HOST", "web01"))
-        commit(path, state, projection, snapshot)
+        commit(path, state, projection, snapshot, archived=archived)
         return
     if projection and Path(projection).suffix == ".sqlite":
         raise ValueError("A SQLite SSH projection requires a SQLite checkpoint")

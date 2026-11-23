@@ -21,13 +21,18 @@ import datetime as _dt
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
+from collections import OrderedDict
+from hmac import compare_digest
 from pathlib import Path
 
 from audit.alerts import record as record_alert
+from audit.flow_evidence import observe_cowrie
+from agent_runtime.service_identity import service_secret
 from dws.ids import ulid_now
 
 _KIND_MAP = {
@@ -123,8 +128,12 @@ def main(argv=None) -> int:
             return 2
         sink = redis.Redis.from_url(args.redis)
 
+    flow_path = os.environ.get("HONEYNET_FLOW_STATE_FILE")
+    flow_key = os.environ.get("HONEYNET_FLOW_HMAC_KEY", "")
+    flow_interface = os.environ.get("HONEYNET_FLOW_INTERFACE", "")
     counter = 0
     skipped = 0
+    employee_sessions = OrderedDict()
 
     src_path = Path(args.src)
     if args.follow and not src_path.exists():
@@ -144,16 +153,50 @@ def main(argv=None) -> int:
         except json.JSONDecodeError:
             skipped += 1
             return
+        if record.get("eventid") == "cowrie.session.handoff":
+            from research.handoffs import enabled, ssh_receipt
+
+            session, parent, child = (record.get(key, "") for key in ("session", "parent_id", "child_id"))
+            if (lab and enabled() and all(isinstance(value, str) for value in (session, parent, child))
+                    and re.fullmatch(r"[a-f0-9]{12}", session)
+                    and all(re.fullmatch(r"[a-f0-9]{64}", value) for value in (parent, child))):
+                ssh_receipt(lab, args.node, session, parent, child)
+            return
+        if record.get("eventid") == "cowrie.session.policy_limit":
+            key = json.dumps([args.node, record.get("session"), record.get("timestamp"), "session_ended"])
+            record_alert("ssh", "session_ended", hashlib.sha256(key.encode()).hexdigest())
+            return
         event = convert(record, counter, args.node, args.dst_host)
         if event is None:
             skipped += 1
             return
+        session = record.get("session")
+        if event["what"]["kind"] == "ssh.login" and session:
+            username = record.get("username")
+            password = record.get("password")
+            expected = service_secret("ssh", username) if isinstance(username, str) else ""
+            if expected and isinstance(password, str) and compare_digest(expected.encode(), password.encode()):
+                employee_sessions[session] = username
+                employee_sessions.move_to_end(session)
+                if len(employee_sessions) > 2048:
+                    employee_sessions.popitem(last=False)
+        employee = employee_sessions.get(session)
+        if employee:
+            event["who"]["user"] = employee
+            event["what"]["activity_source"] = "employee"
+        if event["what"]["kind"] == "ssh.close":
+            employee_sessions.pop(session, None)
         kind = {"ssh.connection": "connection", "ssh.login": "login",
                 "ssh.login_fail": "login_failed"}.get(event["what"]["kind"])
-        if kind:
+        if kind == "connection" and flow_path:
+            try:
+                observe_cowrie(flow_path, flow_key, flow_interface, args.node, record)
+            except (OSError, sqlite3.Error):
+                print("bridge: network evidence store unavailable", file=sys.stderr)
+        if kind and not employee:
             key = json.dumps([args.node, record.get("session"), record.get("timestamp"), kind])
             record_alert("ssh", kind, hashlib.sha256(key.encode()).hexdigest())
-        if lab and event["what"]["kind"] in ("ssh.login", "ssh.login_fail"):
+        if lab and not employee and event["what"]["kind"] in ("ssh.login", "ssh.login_fail"):
             password = record.get("password")
             session = record.get("session")
             if isinstance(password, str) and re.fullmatch(r"[A-Za-z0-9_-]{32}", password) and session:
@@ -161,7 +204,7 @@ def main(argv=None) -> int:
                     lab.observe_lure_use(password, "ssh", f"{args.node}/{session}")
                 except sqlite3.Error:
                     print("bridge: Canary evidence store unavailable", file=sys.stderr)
-        if lab and event["what"]["kind"] == "ssh.command":
+        if lab and not employee and event["what"]["kind"] == "ssh.command":
             from research.protocol_decoys import observe, ssh_activity
             from research.worker import automatic_enabled
 

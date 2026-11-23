@@ -77,6 +77,11 @@ def test_approved_document_publishes_and_rolls_back_through_writer(monkeypatch, 
         assert engine.world.view(active_version).current("data", fact_id).payload["content"] == body["content"]
         assert read(projection)["files"][path]["content"] == body["content"]
         assert read(checkpoint)["meta"]["world_version"] == read(projection)["world_version"] == active_version
+        diff = operator.get("/api/world", params={"kind": "data", "version": active_version,
+                                                  "baseline": old_version}, auth=auth).json()
+        item = next(row for row in diff["diff"] if row["after"]["label"] == path)
+        assert item["change"] == "added" and item["before"] is None
+        assert "content" not in item["after"]
         fresh_run = lab.create(engine.world, "plain")["run_id"]
         old_documents = public.get(f"/decoy/{old_run}/index").json()["documents"]
         fresh_documents = public.get(f"/decoy/{fresh_run}/index").json()["documents"]
@@ -95,3 +100,36 @@ def test_approved_document_publishes_and_rolls_back_through_writer(monkeypatch, 
         assert tombstone.payload["deleted"]
         assert engine.world.view(active_version).current("data", fact_id).payload["content"] == body["content"]
         assert read(projection)["files"][path]["deleted"]
+
+
+def test_retrying_document_does_not_hold_later_approved_jobs(monkeypatch, tmp_path):
+    from business import publication_retry, publications
+
+    checkpoint = tmp_path / "world.sqlite"
+    monkeypatch.setenv("BUSINESS_STATE_FILE", str(checkpoint))
+    checkpoint.touch()
+    monkeypatch.setattr(publication_retry, "time", lambda: 2_000_000_000)
+    base = {"content": "Synthetic queue test", "base_version": 1}
+    first, second = [publications.submit(publications.DocumentProposal(path=f"/kb/{name}.md", **base))["id"]
+                     for name in ("first", "second")]
+    for identifier in (first, second):
+        publications.request_transition(identifier, "approve")
+    attempted = []
+
+    def apply(engine, row, checkpoint):
+        attempted.append(row["id"])
+        if row["id"] == first:
+            raise OSError("simulated persistent failure")
+        return 2
+
+    monkeypatch.setattr(publications, "_apply", apply)
+    publications.apply_next(None, None)
+    publications.apply_next(None, None)
+    assert attempted == [first, second]
+    for _ in range(publication_retry.MAX_ATTEMPTS - 1):
+        with publications.queue() as db:
+            db.execute("UPDATE publication_retry SET retry_at=0 WHERE lane='document' AND job=?", (first,))
+        publications.apply_next(None, None)
+    proposals = {row["id"]: row for row in publications.list_proposals()}
+    assert proposals[first]["status"] == "failed" and proposals[first]["error"] == "OSError"
+    assert proposals[second]["status"] == "active" and proposals[second]["result_version"] == 2

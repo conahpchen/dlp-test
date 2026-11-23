@@ -27,6 +27,13 @@ def html_response(body):
         verification += '<aside><h2>数据库核验</h2><dl><dt>用户名</dt><dd>' + escape(login['username']) + (
             '</dd><dt>密码</dt><dd>' + escape(login['password']) + '</dd></dl></aside>'
         )
+    account = body.get('next_hop', {})
+    if account.get('entry') in ('ssh', 'mysql'):
+        protocol = 'SSH' if account['entry'] == 'ssh' else 'MySQL'
+        verification += '<aside><h2>' + protocol + ' 核验</h2><dl><dt>用户名</dt><dd>' + escape(account['username']) + (
+            '</dd><dt>核验凭据</dt><dd>' + escape(account['password']) + '</dd></dl></aside>')
+    elif account.get('entry') == 'llm':
+        verification += '<aside><h2>模拟 AI 核验</h2><p>' + escape(account['verification_key']) + '</p></aside>'
     return HTMLResponse('<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
                         '<meta name="viewport" content="width=device-width,initial-scale=1">'
                         '<title>' + escape(body.get('title', '知识中心')) + '</title>'

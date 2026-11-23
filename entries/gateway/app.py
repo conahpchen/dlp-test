@@ -24,7 +24,7 @@ from fastapi import FastAPI, Request
 from dws import loader_sql
 from dws.ids import ulid_now
 from dws.world import World
-from entries.gateway.session import bind_model_list, credentials
+from entries.gateway.session import bind_model_list, credentials, install_observation_cookie, observed_session
 from generation.llm_templates import classify_message
 from judgment import L1RulesJudge
 from replay.engine import Engine
@@ -34,6 +34,7 @@ GATEWAY_HOST = os.environ.get("GATEWAY_HOST", "ai01")
 GATEWAY_PORT = 4000
 
 app = FastAPI(title="ai-honeypot gateway", docs_url=None, redoc_url=None)
+install_observation_cookie(app)
 _lock = threading.Lock()
 _engine: Engine | None = None
 
@@ -75,7 +76,7 @@ def respond(payload: dict, status: int = 200):
 
 
 def _build_llm_event(engine: Engine, key_hash: str, body: dict, client_ip: str,
-                     session: str, target_class: str, valid_key: bool) -> dict:
+                     session: str, target_class: str, valid_key: bool, observation: str | None = None) -> dict:
     """构造统一事件（契约 12 §1.2 llm.chat）。"""
     messages = body.get("messages") or []
     last_role = messages[-1].get("role") if messages else None
@@ -100,8 +101,9 @@ def _build_llm_event(engine: Engine, key_hash: str, body: dict, client_ip: str,
         "evidence_ref": f"gateway://{session}/{len(messages)}",
     }
     # 判定（契约 §11）：网关侧预判 → 事件携带 verdict 落库；引擎内缺省兜底重算
-    ctx = {"auth_failures": engine.auth_fails.get(
-               engine.identity.observe(ip24=event["src"]["ip"], cred_hash=key_hash), 0),
+    if observation:
+        event["what"]["observation_id"] = observation
+    ctx = {"auth_failures": engine.online_auth_fails.get(observation, 0),
            "valid_key": valid_key,
            "target_class": target_class}
     event["verdict"] = engine.judge.judge(event, ctx)
@@ -150,9 +152,10 @@ async def chat_completions(request: Request):
 
     with _lock:
         valid_key = engine.check_llm_key(key_hash, session)
+        observation = observed_session(request, "gateway", session)
         event = _build_llm_event(engine, key_hash, body, client_ip, session,
-                                 target_class, valid_key)
-        resp = engine.process(event)
+                                 target_class, valid_key, observation)
+        resp = engine.process(event, observation=observation)
 
     # 事件落库（PG 可用即落；不可用只影响持久化，不影响响应）
     dsn = os.environ.get("HONEYNET_PG_DSN")

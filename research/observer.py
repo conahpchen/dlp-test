@@ -8,6 +8,7 @@ import time
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+from audit.flow_evidence import observe_http
 from research.bindings import HEADER, resolve
 from research.lab import PROBES
 from research.worker import automatic_enabled, enabled as async_adaptation, enqueue
@@ -27,7 +28,7 @@ def install_observer(app, lab_provider, *, allow_model):
         explicit_entry = path == '/' and HEADER in request.headers
         if explicit_entry:
             try:
-                binding = await run_in_threadpool(resolve, lab, request.headers[HEADER])
+                binding = await run_in_threadpool(resolve, lab, request.headers[HEADER], entry="web")
             except KeyError:
                 return JSONResponse({'error': '版本绑定无效'}, status_code=404)
             try:
@@ -46,6 +47,8 @@ def install_observer(app, lab_provider, *, allow_model):
             response = RedirectResponse(f'/decoy/{run}/index', status_code=307)
         else:
             response = await call_next(request)
+            if getattr(request.state, "employee_activity", None):
+                return response
         route = request.scope.get('route')
         what = dict(kind='web.request', method=request.method, status=response.status_code,
                     resource=getattr(route, 'path', 'unmatched'),
@@ -54,10 +57,10 @@ def install_observer(app, lab_provider, *, allow_model):
                     probe=next((p for p in sorted(PROBES) if p in path.split('/')), None),
                     input=visitor_input, duration_ms=round((time.monotonic()-start)*1000),
                     policy_revision=policy.get('revision', 0))
-        try:
-            peer = request.client.host if request.client else 'unknown'
-            agent = request.headers.get('user-agent', '')[:256]
-            await run_in_threadpool(lab.observe, run, session, peer, agent, what)
+        await run_in_threadpool(observe_http, 'web', session, request)
+        peer = request.client.host if request.client else 'unknown'
+        agent = request.headers.get('user-agent', '')[:256]
+        if await run_in_threadpool(lab.observe, run, session, peer, agent, what):
             if path not in ('/', '/ui') and allow_model and os.environ.get('RESEARCH_ADAPTIVE_ENABLED', '1') == '1':
                 from research.controller import adapt
                 from research.model import Model
@@ -83,14 +86,11 @@ def install_observer(app, lab_provider, *, allow_model):
                     titles = {node['id']: node['title'] for node in scene['nodes']}
                     lead = next((node for node in latest.get('expected_next_nodes', []) if node in titles), None)
                     if lead:
-                        await run_in_threadpool(lab.observe, run, session, peer, agent,
-                                               dict(kind='research.lead', resource='/api/documents',
-                                                    title=titles[lead], offered_nodes=[lead], policy_revision=latest['revision']))
-                        response.headers['Link'] = f'</decoy/{run}/scene/{lead}>; rel="related"'
-                        response.headers['Cache-Control'] = 'private, no-store'
-        except OverflowError:
-            # Telemetry cap must not make ordinary business endpoints unavailable.
-            pass
+                        offered = dict(kind='research.lead', resource='/api/documents', title=titles[lead],
+                                       offered_nodes=[lead], policy_revision=latest['revision'])
+                        if await run_in_threadpool(lab.observe, run, session, peer, agent, offered):
+                            response.headers['Link'] = f'</decoy/{run}/scene/{lead}>; rel="related"'
+                            response.headers['Cache-Control'] = 'private, no-store'
         response.set_cookie('research_session', session, httponly=True, samesite='strict',
                             secure=request.url.scheme == 'https', path='/')
         return response

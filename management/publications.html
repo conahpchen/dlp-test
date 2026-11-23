@@ -1,37 +1,55 @@
-<!doctype html>
-<html lang="zh-CN">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>数据发布 · 蜜网管理</title>
-<style>
-body{font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938} header{padding:1rem 2rem;background:#17283f;color:white}
-header a{color:white} main{max-width:52rem;margin:2rem auto;padding:0 1rem}
-form,article{background:white;border-radius:.5rem;padding:1rem;margin:1rem 0}
-label{display:block;margin:1rem 0} textarea,input{display:block;width:100%;box-sizing:border-box;font:inherit}
-button{font:inherit;color:white;background:#17283f;border:0;padding:.5rem .85rem;border-radius:.25rem}
-pre{white-space:pre-wrap;overflow-wrap:anywhere}
-</style>
-<header><a href="/">返回运行总览</a></header>
-<main>
-<h1>合成数据发布</h1>
-<form>
+<div class="master-detail">
+<section class="panel">
+<div class="panel-header"><div><h2>文档编辑</h2><p>草稿保存后进入审核队列。</p></div><span class="tag" id="world-label">等待快照</span></div>
+<form id="publication-form">
 <label>载入现有文档 <select id="existing"><option value="">新建文档</option></select></label>
 <label>知识库文档路径 <input id="path" placeholder="/kb/example.md" required></label>
-<label>合成内容 <textarea id="content" rows="5" maxlength="4096" required></textarea></label>
+<label>合成内容 <textarea id="content" rows="7" maxlength="4096" required></textarea></label>
 <button type="submit">保存发布草稿</button>
 </form>
-<h2>发布记录</h2>
-<button id="reload" type="button">刷新状态</button>
-<p id="status" role="status"></p>
-<div id="history"></div>
-</main>
+<p id="status" class="status" role="status" aria-live="polite"></p>
+</section>
+<section class="panel">
+<div class="panel-header"><div><h2>发布队列与历史</h2><p id="proposal-count">正在读取变更记录</p></div>
+<button id="reload" type="button">刷新状态</button></div>
+<div class="toolbar">
+<label>文档路径 <input id="history-search" type="search" placeholder="搜索路径"></label>
+<label>状态 <select id="history-filter"><option value="">所有状态</option><option value="draft">待审核</option>
+<option value="approved">等待发布</option><option value="active">已发布</option>
+<option value="rollback_pending">等待撤回</option><option value="rolled_back">已撤回</option>
+<option value="rejected">已拒绝</option></select></label>
+</div><div class="records" id="history"></div>
+</section></div>
+<div class="master-detail">
+<section class="panel">
+<div class="panel-header"><div><h2>DWS 图发布</h2><p>在一个版本发布知识文档、数据库目录和关联。选择会话分支可限制投影范围。</p></div></div>
+<form id="graph-form">
+<label>基线版本 <input name="base" type="number" min="1" required></label>
+<label>范围 <select name="scope"><option value="branch">会话分支</option><option value="public">当前世界</option></select></label>
+<label>文档编号 <input name="document" maxlength="28" pattern="[a-z][a-z0-9_]{0,27}" required></label>
+<label>合成正文 <textarea name="body" rows="4" maxlength="2048" required></textarea></label>
+<label>数据库目录编号 <input name="database" maxlength="28" pattern="[a-z][a-z0-9_]{0,27}" required></label>
+<button type="submit">保存图草稿</button>
+</form>
+<p id="graph-status" class="status" role="status"></p>
+</section>
+<section class="panel">
+<div class="panel-header"><div><h2>DWS 图发布记录</h2><p>分支需通过会话绑定接口签发凭据。</p></div><button type="button" id="graph-refresh">刷新状态</button></div>
+<div id="graph-history" class="records"></div>
+</section></div>
 <script>
 const status = document.querySelector('#status');
 const historyPanel = document.querySelector('#history');
 const existing = document.querySelector('#existing');
 let snapshot = null;
+let proposals = [];
+const filter = document.querySelector('#history-filter');
+const search = document.querySelector('#history-search');
 async function loadDocuments() {
   snapshot = await request('/api/publication-documents');
+  const graphBaseline = documentQuery('#graph-form [name=base]');
+  if (!graphBaseline.value) graphBaseline.value = snapshot.world_version;
+  documentQuery('#world-label').textContent = '基线 DWS v' + snapshot.world_version;
   existing.replaceChildren(new Option('新建文档', ''));
   for (const document of snapshot.documents) existing.add(new Option(document.path, document.path));
 }
@@ -54,10 +72,19 @@ async function request(path, body) {
   return result;
 }
 async function refresh() {
-  const proposals = await request('/api/publications');
+  proposals = await request('/api/publications');
+  renderHistory();
+}
+function renderHistory() {
   historyPanel.replaceChildren();
-  for (const row of proposals) {
+  const query = search.value.trim().toLocaleLowerCase();
+  const rows = proposals.filter(row => (!filter.value || row.status === filter.value) &&
+    row.path.toLocaleLowerCase().includes(query));
+  document.querySelector('#proposal-count').textContent = rows.length + ' 条变更';
+  if (!rows.length) historyPanel.textContent = '暂无符合条件的发布记录。';
+  for (const row of rows) {
     const article = document.createElement('article');
+    article.className = 'record';
     const title = document.createElement('h3');
     title.textContent = row.path;
     const summary = document.createElement('p');
@@ -65,7 +92,11 @@ async function refresh() {
       (row.result_version ? ' · DWS 版本 ' + row.result_version : '');
     const content = document.createElement('pre');
     content.textContent = row.content;
-    article.append(title, summary, content);
+    const detail = document.createElement('details');
+    const caption = document.createElement('summary');
+    caption.textContent = '查看草稿正文';
+    detail.append(caption, content);
+    article.append(title, summary, detail);
     if (row.error) {
       const error = document.createElement('p');
       error.textContent = row.error;
@@ -74,10 +105,13 @@ async function refresh() {
     if (row.status === 'draft' || row.status === 'active') {
       const button = document.createElement('button');
       button.textContent = row.status === 'draft' ? '审核通过并发布' : '撤回发布';
-      button.onclick = () => perform(async () => {
+      button.onclick = () => {
+        if (row.status === 'active' && !window.confirm('撤回这次合成文档发布？')) return;
+        perform(async () => {
         await request('/api/publications/' + row.id + '/' + (row.status === 'draft' ? 'approve' : 'rollback'), {});
         status.textContent = '已加入发布队列';
-      });
+        });
+      };
       article.append(button);
     }
     historyPanel.append(article);
@@ -91,10 +125,14 @@ async function perform(action) {
     status.textContent = error.message;
   }
 }
-document.querySelector('#reload').onclick = () => perform();
-document.querySelector('form').onsubmit = event => {
+filter.onchange = renderHistory;
+search.oninput = renderHistory;
+document.querySelector('#reload').onclick = () => perform(loadDocuments);
+document.querySelector('#publication-form').onsubmit = event => {
   event.preventDefault();
   const form = event.currentTarget;
+  const submit = form.querySelector('button[type=submit]');
+  submit.disabled = true;
   perform(async () => {
     if (!snapshot) await loadDocuments();
     await request('/api/publications', {
@@ -105,8 +143,73 @@ document.querySelector('form').onsubmit = event => {
     form.reset();
     await loadDocuments();
     status.textContent = '草稿已保存';
-  });
+  }).finally(() => { submit.disabled = false; });
+};
+const graphForm = documentQuery('#graph-form');
+const graphStatus = documentQuery('#graph-status');
+const graphHistory = documentQuery('#graph-history');
+async function refreshGraphs() {
+  const rows = await request('/api/graph-publications');
+  graphHistory.replaceChildren();
+  if (!rows.length) graphHistory.textContent = '暂无 DWS 图发布记录。';
+  for (const row of rows) {
+    const item = document.createElement('article');
+    item.className = 'record';
+    const title = document.createElement('h3');
+    title.textContent = row.payload.edges.map(edge => edge.source + ' → ' + edge.target).join('、');
+    const summary = document.createElement('p');
+    const state = ({withdraw_pending:'等待撤回', withdrawn:'已撤回'})[row.status] || labels[row.status];
+    summary.textContent = state + ' · ' + (row.payload.scope === 'branch' ? '会话分支' : '当前世界') +
+      ' · 基线 v' + row.payload.base_version + (row.result_version ? ' · 变更 v' + row.result_version : '');
+    const id = document.createElement('code');
+    id.textContent = row.id;
+    item.append(title, summary, id);
+    if (row.error) {
+      const error = document.createElement('p');
+      error.textContent = row.error;
+      item.append(error);
+    }
+    if (row.status === 'draft' || row.status === 'active') {
+      const button = document.createElement('button');
+      const approve = row.status === 'draft';
+      button.textContent = approve ? '审核通过并发布' : '撤回图发布';
+      button.onclick = async () => {
+        if (!approve && !window.confirm('撤回这次 DWS 图发布？')) return;
+        button.disabled = true;
+        try {
+          await request('/api/graph-publications/' + row.id + '/' + (approve ? 'approve' : 'withdraw'), {});
+          graphStatus.textContent = '已加入发布队列';
+          await refreshGraphs();
+        } catch (error) { graphStatus.textContent = error.message; }
+        finally { button.disabled = false; }
+      };
+      item.append(button);
+    }
+    graphHistory.append(item);
+  }
+}
+const safeGraphRefresh = () => refreshGraphs().catch(error => { graphStatus.textContent = error.message; });
+documentQuery('#graph-refresh').onclick = safeGraphRefresh;
+graphForm.onsubmit = async event => {
+  event.preventDefault();
+  const fields = new FormData(graphForm);
+  const button = graphForm.querySelector('button[type=submit]');
+  button.disabled = true;
+  try {
+    await request('/api/graph-publications', {
+      base_version:Number(fields.get('base')), scope:fields.get('scope'),
+      nodes:[{id:fields.get('document'), kind:'document', content:fields.get('body')},
+             {id:fields.get('database'), kind:'database'}],
+      edges:[{source:fields.get('document'), target:fields.get('database')}]
+    });
+    const base = fields.get('base');
+    graphForm.reset();
+    graphForm.elements.base.value = base;
+    graphStatus.textContent = 'DWS 图草稿已保存';
+    await refreshGraphs();
+  } catch (error) { graphStatus.textContent = error.message; }
+  finally { button.disabled = false; }
 };
 perform(loadDocuments);
+safeGraphRefresh();
 </script>
-</html>

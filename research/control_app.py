@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from audit.situations import publish_reports
 from business.storage import restore
 from dws.world import World
 from replay.engine import Engine
@@ -53,14 +54,32 @@ async def bootstrap_scene(stop, interval=30):
             if await asyncio.to_thread(lab.active):
                 return
             if run is None:
-                engine, _ = await asyncio.to_thread(checkpoint)
-                result = await asyncio.to_thread(lab.create, engine.world, "plain", Model(),
-                                                 automatic=True)
-                run = result["run_id"]
+                run = await asyncio.to_thread(lab.pending_automatic_run)
+                if run is None:
+                    engine, _ = await asyncio.to_thread(checkpoint)
+                    result = await asyncio.to_thread(lab.create, engine.world, "plain", Model(),
+                                                     automatic=True)
+                    run = result["run_id"]
             await asyncio.to_thread(lab.activate, run, only_if_inactive=True)
             return
         except Exception as exc:
             logging.getLogger(__name__).warning("Automatic scene initialization pending (%s)", type(exc).__name__)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            pass
+
+
+async def monitor_situations(stop, interval=15):
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(publish_reports)
+            if os.environ.get("HONEYNET_SITUATION_MODEL") == "1":
+                from audit.situation_model import assess_next
+
+                await asyncio.to_thread(assess_next)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Situation report collection failed (%s)", type(exc).__name__)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except TimeoutError:
@@ -75,8 +94,10 @@ async def lifespan(_app):
         tasks.append(asyncio.create_task(bootstrap_scene(stop)))
     if enabled():
         tasks.append(asyncio.create_task(consume(current_lab, stop)))
-    if os.environ.get("HONEYNET_RELEASE_MONITOR") == "1":
+    if os.environ.get("HONEYNET_RELEASE_MONITOR") == "1" or os.environ.get("RESEARCH_AUTO_SERVICE_CAPABILITIES"):
         tasks.append(asyncio.create_task(monitor_releases(stop)))
+    if os.environ.get("HONEYNET_SITUATION_REPORTS") == "1":
+        tasks.append(asyncio.create_task(monitor_situations(stop)))
     try:
         yield
     finally:

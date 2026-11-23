@@ -1,6 +1,5 @@
 """Read-only deployment status, DWS changes and observed request metrics."""
 
-import html
 import math
 import os
 import socket
@@ -10,9 +9,11 @@ import httpx
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 
+from audit.employee_activity import recent_activity
 from audit.http_latency import samples
 from business.atomic_state import read
 from business.storage import location
+from management.layout import esc, metric, page, table, table_tools
 from research.api import current_lab
 from research.model_budget import usage_today
 
@@ -88,6 +89,7 @@ def status():
     lab = current_lab()
     active = lab.active()
     return {"listeners": listeners, "active_run": active, "release": lab.release_status(active) if active else None,
+            "employee_activity": recent_activity(os.environ.get("HONEYNET_EMPLOYEE_ACTIVITY_FILE")),
             "release_health": lab.compensate_unready(inspect_only=True) if active else None, "latency_windows": _latency_windows(), "world_changes": _changes(), "model_budget_today": usage_today()}
 
 
@@ -99,36 +101,63 @@ def operations_router(require_operator):
         return status()
 
     @router.get("/operations", response_class=HTMLResponse)
-    def page():
+    def show():
         snapshot = status()
-
-        def table(columns, rows):
-            header = "".join("<th>" + html.escape(column) + "</th>" for column in columns)
-            body = "".join("<tr>" + "".join("<td>" + html.escape(str(value)) + "</td>" for value in row)
-                           + "</tr>" for row in rows)
-            return f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>" if body else "<p>暂无记录</p>"
-
-        names = {"unconfigured": "未配置", "unreachable": "不可达", "unexpected": "响应异常", "responding": "有响应"}
-        details = snapshot["release"] or {}
-        manifest = details.get("manifest") or {}
-        budget = snapshot["model_budget_today"]
+        labels = {"unconfigured": "未配置", "unreachable": "不可达",
+                  "unexpected": "响应异常", "responding": "有响应"}
+        tones = {"responding": "ok", "unreachable": "bad", "unexpected": "warn", "unconfigured": ""}
+        listeners = snapshot["listeners"]
+        budget = snapshot["model_budget_today"] or {}
         health = (snapshot["release_health"] or {}).get("status")
-        release_health = {"healthy": "已通过能力检查", "unready": "有依赖异常", "not_applicable": "暂无发布清单"}
-
-        return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>部署与运行 · 蜜网管理</title>
-<style>body{{margin:0;background:#eef2f5;color:#192839;font:16px system-ui}}header{{background:#17283f;color:white;padding:1.25rem}}
-header a{{color:white;margin-right:1rem}}main{{max-width:72rem;margin:auto;padding:1.5rem}}section{{background:white;padding:1.1rem;border-radius:.6rem;margin:1rem 0;overflow:auto}}
-table{{width:100%;border-collapse:collapse}}th,td{{padding:.5rem;text-align:left;border-bottom:1px solid #e4e9ee}}h2{{margin-top:0}}</style>
-<header><a href="/">运行总览</a><a href="/evidence">会话与发布</a><a href="/publications">数据发布</a></header>
-<main><h1>部署与运行</h1><a href="/operations">刷新</a>
-<section><h2>入站监听器</h2>{table(("入口", "协议", "回环端口", "探测结果"), ((r["name"], r["protocol"], r["port"] or "—", names[r["status"]]) for r in snapshot["listeners"]))}</section>
-<section><h2>当前投放</h2><p>{html.escape(snapshot["active_run"] or "暂无活跃运行")}</p>
-<p>{release_health.get(health, "暂无检查结果")}</p>
-{table(("能力", "分级", "协议", "可达范围"), ((c["name"], c["level"], c["protocol"], c["exposure"]) for c in manifest.get("capabilities", [])))}</section>
-<section><h2>最近 HTTP 请求窗口</h2>{table(("窗口首个样本", "请求数", "服务错误数", "p95 毫秒"), (tuple(r.values()) for r in snapshot["latency_windows"]))}</section>
-<section><h2>DWS 变更</h2>{table(("实体类型", "实体 ID", "DWS 版本", "实体修订"), (tuple(r.values()) for r in snapshot["world_changes"]))}</section>
-<section><h2>今日模型账本</h2>{table(("预留 token", "估算费用（微美元）"), (tuple(budget.values()),) if budget else ())}</section>
-</main></html>"""
+        release_names = {"healthy": "依赖健康", "unready": "依赖异常",
+                         "not_applicable": "暂无发布清单"}
+        services = {"ssh": "SSH", "mysql": "MySQL", "llm": "模拟 AI API", "web": "OA 工单"}
+        employee_status = {"completed": "已完成", "failed": "交互失败", "unconfigured": "未配置凭据"}
+        tasks = {"check_host": "主机巡检", "review_deploy_notes": "查看发布资料",
+                 "review_catalog": "复核库目录", "check_readiness": "连通性检查",
+                 "read_handbook": "查看运维手册", "review_service_inventory": "复核服务资产",
+                 "review_ticket_queue": "检查工单队列"}
+        manifest = (snapshot["release"] or {}).get("manifest") or {}
+        cards = "".join((
+            metric("监听器有响应", f'{sum(r["status"] == "responding" for r in listeners)} / {len(listeners)}',
+                   "按本次回环探测", "mint"),
+            metric("当前发布依赖", release_names.get(health), "按已部署能力检查"),
+            metric("今日预留 Token", budget.get("reserved_tokens"), "控制面模型预算"),
+            metric("今日估算费用", budget.get("estimated_cost_microusd"), "单位为微美元", "warm"),
+        ))
+        inventory = "".join(f"""
+            <div class="record"><h3>{esc(r["name"])}</h3>
+            <p>{esc(r["protocol"])} · 回环端口 {esc(r["port"] or "—")}</p>
+            <p><span class="tag {tones[r["status"]]}">{labels[r["status"]]}</span></p></div>""" for r in listeners)
+        load = snapshot["latency_windows"]
+        peak = max((w["p95_ms"] for w in load), default=0)
+        chart = "".join(f'<div class="column"><div class="bar" style="--height:{w["p95_ms"] * 100 / peak if peak else 0:g}%" '
+                        f'title="样本 {w["first_sample"]} · {w["p95_ms"]} ms"></div></div>' for w in load)
+        version = manifest.get("world_version")
+        service_table = table(("能力", "分级", "协议", "可达范围", "绑定版本"),
+            ((c["name"], f'L{c["level"]}', c["protocol"], c["exposure"],
+              f"v{version}" if version is not None else "—") for c in manifest.get("capabilities", ())),
+            "当前场景没有发布能力清单")
+        employee_table = table(("时间（UTC）", "员工", "入口", "任务", "结果"),
+            ((r["recorded_at"], r["username"], services.get(r["service"], r["service"]),
+              tasks.get(r["task"], r["task"]), employee_status.get(r["status"], r["status"]))
+             for r in snapshot["employee_activity"]), "尚未收到员工 Agent 活动")
+        latency = table(("首样本", "请求数", "服务错误", "实测 p95（ms）"),
+                        ((w["first_sample"], w["requests"], w["server_errors"], w["p95_ms"]) for w in load),
+                        "尚未采样到 HTTP 请求")
+        body = f"""<section class="metrics">{cards}</section>
+        <section class="panel"><div class="panel-header"><div><h2>蜜罐服务</h2><p>握手或 HTTP 响应基于实际探测</p></div>
+        <a href="/world">DWS 服务与关系 →</a></div><div class="service-overview">{inventory}</div></section>
+        <div class="dashboard-grid"><section class="panel"><div class="panel-header"><div><h2>HTTP 响应延迟</h2>
+        <p>每组最多 64 个请求，p95 按单请求样本计算。</p></div></div>
+        {f'<div class="chart" aria-hidden="true">{chart}</div>' if chart else ""}{latency}</section>
+        <section class="panel"><div class="panel-header"><div><h2>当前投放</h2>
+        <p class="mono">{esc(snapshot["active_run"] or "暂无活跃运行")}</p></div><a href="/releases">发布记录 →</a></div>
+        {service_table}</section></div>
+        <section class="panel"><div class="panel-header"><div><h2>员工 Agent 跨服务活动</h2>
+        <p>记录按真实协议执行的日常任务及结果。</p></div></div>
+        {table_tools("employee-rows", "搜索员工、协议或任务")}<div id="employee-rows">{employee_table}</div></section>"""
+        return page("/operations", "部署与运行", "检查入口健康、发布依赖、实测延迟、模型用量和员工活动。", body,
+                    actions='<a class="button" href="/operations">重新探测</a>')
 
     return router

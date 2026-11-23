@@ -96,13 +96,22 @@ def test_probe_and_self_claim_are_only_hypotheses(lab, world):
 
 
 def test_budget_atomic_and_persistent(lab, world, monkeypatch):
+    from research import lab as capture
+
+    clock = [1795478400]
     monkeypatch.setattr('research.lab.MAX_EVENTS', 2)
+    monkeypatch.setattr(capture, 'time', lambda: clock[0])
     run = lab.create(world, 'plain')['run_id']
     visit(lab, run, 'index')
     visit(lab, run, 'index')
-    with pytest.raises(OverflowError):
-        visit(lab, run, 'index')
-    assert len(ResearchLab(lab.path).report(run)['events']) == 2
+    assert visit(lab, run, 'index')[0] == 200
+    restored = ResearchLab(lab.path)
+    assert len(restored.report(run)['events']) == 2
+    assert restored.capture_status(run)['dropped_total'] == 1
+    clock[0] += capture.CAPTURE_WINDOW
+    assert restored.capture_available(run)
+    assert visit(restored, run, 'index')[0] == 200
+    assert [event['evidence_ref'].rsplit('/', 1)[-1] for event in restored.report(run)['events']] == ['1', '2', '3']
 
 
 @pytest.fixture
@@ -114,6 +123,80 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv('HONEYNET_PG_DSN', raising=False)
     monkeypatch.setattr(biz, '_engine', None)
     return TestClient(biz.app)
+
+
+def test_capture_limit_preserves_web_delivery_and_issued_canary(client, monkeypatch):
+    monkeypatch.setattr('research.lab.MAX_EVENTS', 2)
+    monkeypatch.setenv('HONEYNET_CANARY_HANDOFFS', '1')
+    start = client.post('/api/research/runs', headers={'x-control-token': 'test-research-control'},
+                        json={'mode': 'fixture', 'variant': 'agent_note'}).json()
+    path = client.get(start['entry']).json()['documents'][0]['href']
+    received = client.get(path).json()
+    assert 'verification_link' in received
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.json()['content'] == received['content']
+    assert 'verification_link' not in response.json()
+    assert client.get(received['verification_link']).json() == {'received': True}
+    lab = current_lab()
+    assert lab.capture_status(start['run_id'])['dropped_total'] == 2
+    (hit,) = lab.canary_uses(start['run_id'])
+    assert hit['entry'] == 'web' and hit['associated']
+
+
+def test_operator_can_shorten_canary_path_for_future_deliveries(client, monkeypatch):
+    from audit.situation_model import assess_next
+    from audit.situations import publish_reports
+    from management.app import app as dashboard
+
+    monkeypatch.setenv('HONEYNET_CANARY_HANDOFFS', '1')
+    monkeypatch.setenv('HONEYNET_DASHBOARD_PASSWORD', 'synthetic-operator')
+    manager = TestClient(dashboard)
+    auth = ('operator', 'synthetic-operator')
+    run = client.post('/api/research/runs', headers={'x-control-token': 'test-research-control'},
+                      json={'mode': 'fixture', 'variant': 'agent_note'}).json()['run_id']
+    evidence = f'/api/evidence/runs/{run}'
+    policy = evidence + '/handoff-policy'
+    path = f'/decoy/{run}/documents/0'
+    short = ['web', 'llm', 'web']
+    assert manager.put(policy, json={'route': short}).status_code == 401
+    assert manager.put(policy, auth=auth, json={'route': ['web', 'llm', 'ssh']}).status_code == 422
+    assert manager.put(policy, auth=auth, json={'route': short}).json()['route'] == short
+    assert manager.get(evidence, auth=auth).json()['release']['handoff_route'] == short
+    original = client.get(path).json()['verification_link']
+    assert manager.put(policy, auth=auth, json={'route': ['web']}).json()['route'] == ['web']
+    key = client.get(original).json()['next_hop']['verification_key']
+    verification = client.post('/v1/chat/completions', headers={'Authorization': 'Bearer ' + key},
+                               json={'model': 'corp-llm-7b'})
+    assert verification.status_code == 401
+    assert client.get(verification.json()['next_hop']['href']).json() == {'received': True}
+    with TestClient(biz.app) as another:
+        fresh = another.get(path).json()['verification_link']
+        assert fresh != original
+        assert another.get(fresh).json() == {'received': True}
+    monkeypatch.setenv('HONEYNET_SITUATION_REPORT_FILE', str(current_lab().path.parent / 'situations.sqlite'))
+    assert publish_reports() == 2
+
+    class Analyst:
+        name = 'synthetic-analyst'
+
+        def choose(self, messages):
+            import json
+
+            observations = json.loads(messages[-1]['content'])['observations']
+            assert observations['chain:protocols'] == 2
+            assert run not in messages[-1]['content'] and key not in messages[-1]['content']
+            return {'assessment': 'cross_protocol', 'severity': 'high', 'recommendations': [
+                {'action': 'notify_operator', 'evidence': ['chain:protocols']},
+                {'action': 'review_block', 'evidence': ['chain:protocols']},
+            ]}
+
+    assert assess_next(Analyst)
+    report = next(row for row in manager.get('/api/situations', auth=auth).json()
+                  if row['kind'] == 'cross_protocol')
+    assert report['analysis']['status'] == 'ready'
+    assert '提交阻断复核' in manager.get('/situations', auth=auth).text
+    assert client.get('/api/situations').status_code == 404
 
 
 def test_control_boundary_and_public_cookie(client, monkeypatch):
@@ -308,3 +391,22 @@ def test_run_inference_budget_limits_actual_calls(lab, world):
         adapt(lab, run, 'a', model)
     assert model.calls == 20
     assert len(lab.report(run)['decisions']) == 20
+
+
+def test_model_budget_renews_without_blocking_new_sessions(lab, world, monkeypatch):
+    from research import controller
+
+    clock = [1795478400]
+    monkeypatch.setattr(controller, 'time', lambda: clock[0])
+    monkeypatch.setattr(controller, 'SESSION_DECISIONS', 1)
+    monkeypatch.setattr(controller, 'RUN_DECISIONS', 2)
+    run = lab.create(world, 'plain')['run_id']
+    model = DecisionModel('continue_dialogue')
+    for session, status in [('a', 'applied'), ('a', 'budget_exhausted'),
+                            ('b', 'applied'), ('c', 'budget_exhausted')]:
+        assert visit(lab, run, 'index', session=session)[0] == 200
+        assert controller.adapt(lab, run, session, model, interval=1)['status'] == status
+    assert model.calls == 2
+    clock[0] += controller.DECISION_WINDOW
+    assert controller.adapt(lab, run, 'a', model, interval=1)['status'] == 'applied'
+    assert model.calls == 3

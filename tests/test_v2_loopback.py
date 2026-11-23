@@ -21,12 +21,12 @@ def listener(app, env, *, ingress_only=False):
         )
     try:
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=2, trust_env=False) as client:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 10
             while True:
                 try:
                     client.get("/openapi.json")
                     break
-                except httpx.ConnectError:
+                except (httpx.ConnectError, httpx.ReadTimeout):
                     if time.monotonic() >= deadline or process.poll() is not None:
                         raise
                     time.sleep(0.05)
@@ -44,12 +44,16 @@ def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_pa
     common = dict(os.environ, BUSINESS_STATE_FILE=str(tmp_path / "world.sqlite"),
                   HONEYNET_COWRIE_EXPORT=str(tmp_path / "ssh" / "world.sqlite"),
                   RESEARCH_STATE_FILE=str(tmp_path / "research.sqlite"),
+                  HONEYNET_SITUATION_REPORT_FILE=str(tmp_path / "situations.sqlite"),
+                  HONEYNET_ALERTS_FILE=str(tmp_path / "alerts.sqlite"),
                   HONEYNET_LATENCY_FILE=str(tmp_path / "http.sqlite"), HONEYNET_PG_DSN="")
     for name in ("RESEARCH_MODEL_API_KEY", "HONEYNET_CONTROL_TOKEN", "HONEYNET_DASHBOARD_PASSWORD"):
         common.pop(name, None)
     with ExitStack() as stack:
         public = stack.enter_context(listener("business.app:app", dict(common, HONEYNET_VISITOR_ONLY="1")))
-        control = stack.enter_context(listener("research.control_app:app", dict(common, HONEYNET_CONTROL_TOKEN="test-control")))
+        control = stack.enter_context(listener("research.control_app:app", dict(
+            common, HONEYNET_CONTROL_TOKEN="test-control", HONEYNET_SITUATION_REPORTS="1",
+        )))
         dashboard = stack.enter_context(listener("management.app:app", dict(
             common, HONEYNET_DASHBOARD_PASSWORD="test-dashboard",
             HONEYNET_VISITOR_PORT=str(public.base_url.port),
@@ -72,6 +76,13 @@ def test_public_fake_ai_and_authenticated_managers_use_separate_listeners(tmp_pa
         assert data["http_response_p95_ms"] > 0
         operator = ("operator", "test-dashboard")
         assert public.get("/api/templates").status_code == 404
+        assert public.get("/api/situations").status_code == 404
+        assert dashboard.get("/api/situations").status_code == 401
+        deadline = time.monotonic() + 5
+        while not (reports := dashboard.get("/api/situations", auth=operator).json()):
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+        assert reports[0]["kind"] == "hourly" and reports[0]["alerts"] is None
         assert public.get("/api/operations").status_code == 404
         assert dashboard.get("/operations").status_code == 401
         assert "部署与运行" in dashboard.get("/operations", auth=operator).text

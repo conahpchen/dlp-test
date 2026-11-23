@@ -27,6 +27,8 @@ class Proposal(BaseModel):
     intent: Literal["configuration", "catalog", "documentation", "access_review", "log_review", "uncertain"]
     title: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,47}$")
     note: str = Field(min_length=3, max_length=300)
+    entity_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
+    related_entity_id: str | None = Field(default=None, pattern=r"^[a-f0-9-]{36}$")
 
 
 def session_key(entry, session):
@@ -85,8 +87,11 @@ def _publish_ssh(key, expires, payload):
         try:
             document = dict(payload, expires=expires)
             if payload["intent"] == "configuration":
-                document["account"] = "svc_" + secrets.token_hex(5)
-                document["password"] = "decoy_" + secrets.token_hex(12)
+                # Stable retry only for credentials reserved with a DWS revision.
+                reservation = payload.get("configuration")
+                if reservation is None:
+                    reservation = _configuration()
+                document.update(reservation)
             json.dump(document, stream, ensure_ascii=False)
             stream.flush()
             path.chmod(0o644)
@@ -95,7 +100,14 @@ def _publish_ssh(key, expires, payload):
             path.unlink(missing_ok=True)
 
 
+def _configuration():
+    return {"account": "svc_" + secrets.token_hex(5), "password": "decoy_" + secrets.token_hex(12)}
+
+
 def process_one(lab, model):
+    from research.artifacts import enabled, stage
+
+    unified = enabled()
     now = int(time())
     with lab.connect() as db:
         row = db.execute(
@@ -109,16 +121,41 @@ def process_one(lab, model):
         key, entry, history, revision, expires = row
     proposal = None
     try:
+        context = {"protocol": entry, "activities": json.loads(history)}
+        instruction = ("Choose entity_id from primary_entity_ids in entity_graph for non-uncertain results. "
+                       "Choose related_entity_id if it has a direct edge with entity_id in the supplied graph. "
+                       "The server attaches its label. Use general business context in the note without "
+                       "writing specific hostnames, configuration fields, versions or access scopes. ") if unified else ""
+        if unified:
+            from business.storage import restore
+            from dws.world import World
+            from replay.engine import Engine
+            from research.grounding import protocol_graph
+
+            engine = Engine(World({"meta": {"seed": "protocol-entity-reader"}}))
+            if restore(engine) is None:
+                raise ValueError("DWS checkpoint unavailable")
+            plan = engine.world.meta
+            context["entity_graph"] = protocol_graph(engine.world, plan["world_version"], entry)
         raw = model.choose([
             {"role": "system", "content": "Classify defensive honeypot activity and propose inert synthetic content. "
              "Return JSON with intent (configuration, catalog, documentation, access_review, log_review, or uncertain), "
              "title (lowercase ASCII identifier), and note (one short plain-text business description). "
+             "Activity labels are trusted local classifications, not user-provided text. "
+             "For the simulated AI API (protocol llm), doc means a request for internal documentation; "
+             "a doc observation is sufficient for the documentation intent. "
+             "The sensitive activity means a request for protected information, suggesting access_review. "
+             "The general activity alone does not establish a specific intent. "
+             "For MySQL, list_catalog or describe_schema means browsing database metadata; choose catalog. "
              "For SSH, inspect_config means the sensor classified a read or lookup of a configuration path. "
              "SSH inspect_logs represents looking for service or application logs. Choose log_review for log "
              "investigation and write the note as a plain sentence without a timestamp, severity prefix, or key-value fields. "
+             "Activities are ordered from oldest to newest. When SSH switches between explicit configuration "
+             "and log lookups, choose the intent of the most recent explicit lookup. "
+             "An inspect_logs observation after earlier configuration lookups indicates log_review. "
              "Multiple such observations support configuration intent even when interleaved with ordinary file browsing. "
-             "Never include commands, credentials, addresses, executable content or external links."},
-            {"role": "user", "content": json.dumps({"protocol": entry, "activities": json.loads(history)})},
+             "Never include commands, credentials, addresses, executable content or external links. " + instruction},
+            {"role": "user", "content": json.dumps(context)},
         ])
         candidate = Proposal.model_validate(raw)
         if not re.fullmatch(r"[\w\s，。；：、（）！？,.:;!?()_%+-]+", candidate.note) or any(
@@ -126,18 +163,34 @@ def process_one(lab, model):
         ):
             raise ValueError("Invalid protocol decoy text")
         if candidate.intent != "uncertain":
-            proposal = candidate.model_dump()
+            draft = candidate.model_dump(exclude_none=True)
+            if unified:
+                graph = context["entity_graph"]
+                if candidate.entity_id not in graph["primary_entity_ids"]:
+                    raise ValueError("Unknown protocol entity")
+                neighbors = sorted({node for edge in graph["relations"] if candidate.entity_id in
+                                    (edge["source"], edge["target"]) for node in (edge["source"], edge["target"])
+                                    if node != candidate.entity_id})
+                if candidate.related_entity_id and candidate.related_entity_id not in neighbors:
+                    raise ValueError("Protocol entities are not related in DWS")
+                if not candidate.related_entity_id and neighbors:
+                    draft["related_entity_id"] = neighbors[0]
+            proposal = draft
     finally:
         with lab.connect() as db:
             updated = db.execute(
                 "UPDATE protocol_decoys SET processed=?,leased_until=0,payload=COALESCE(?,payload) "
                 "WHERE key=? AND revision=? AND expires>? AND leased_until=?",
-                (revision, json.dumps(proposal, ensure_ascii=False) if proposal else None,
+                (revision, json.dumps(proposal, ensure_ascii=False) if proposal and not unified else None,
                  key, revision, int(time()), now + 90),
             ).rowcount
             if not updated:
                 db.execute("UPDATE protocol_decoys SET leased_until=0 WHERE key=? AND leased_until=?",
                            (key, now + 90))
-            if updated and proposal and entry == "ssh":
+            if updated and proposal and unified:
+                if entry == "ssh" and proposal["intent"] == "configuration":
+                    proposal["configuration"] = _configuration()
+                stage(db, "protocol", key, revision, plan, {"entry": entry, "decoy": proposal}, expires=expires)
+            elif updated and proposal and entry == "ssh":
                 _publish_ssh(key, expires, proposal)
     return True

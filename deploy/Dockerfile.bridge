@@ -1,7 +1,9 @@
 FROM python:3.11-slim
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir redis
+RUN pip install --no-cache-dir redis PyYAML
+COPY agent_runtime/ agent_runtime/
+COPY audit/ audit/
 COPY contracts/ contracts/
 COPY dws/ dws/
 COPY generation/ generation/

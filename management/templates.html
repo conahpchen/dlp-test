@@ -1,81 +1,94 @@
-<!doctype html>
-<html lang="zh-CN">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>场景模板 · 蜜网管理</title>
-<style>
-  body {font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938}
-  header {background:#17283f;color:white;padding:1rem 2rem}
-  header a {color:white}
-  main {max-width:48rem;margin:2rem auto;padding:0 1rem}
-  form {background:white;border-radius:.6rem;padding:1.5rem}
-  label {display:block;margin:.9rem 0}
-  input,textarea,select,button {font:inherit;padding:.45rem}
-  textarea,input {box-sizing:border-box;display:block;width:100%}
-  button {background:#17283f;color:white;border:0;border-radius:.3rem;cursor:pointer}
-</style>
-<header><a href="/">返回运行总览</a></header>
-<main>
-  <h1>场景模板</h1>
-  <p>保存会创建模板的新修订版。创建研究场景时可选择具体修订。</p>
-  <form>
-    <label>选择模板 <select id="selection"></select></label>
-    <label>名称 <input id="name" maxlength="100" required></label>
-    <label>展示方式 <select id="variant"><option value="plain">普通知识库</option><option value="agent_note">带核验链接</option></select></label>
-    <label>合成场景生成目标 <textarea id="goal" rows="5" maxlength="2000" required></textarea></label>
-    <button type="submit">保存模板修订</button>
-    <p id="status" role="status" aria-live="polite"></p>
-  </form>
-</main>
+<div class="master-detail">
+  <section class="panel">
+    <div class="panel-header"><div><h2>模板库</h2><p id="template-count" role="status">正在读取模板</p></div>
+    <button id="new-template" type="button">新建</button></div>
+    <label class="field">搜索模板<input id="template-search" type="search" placeholder="按名称或生成目标"></label>
+    <div id="template-list" class="list" aria-label="模板列表"></div>
+  </section>
+  <section class="panel">
+    <div class="panel-header"><div><h2 id="editor-title">新增模板</h2><p>保存后产生一个可供场景生成引用的新修订。</p></div>
+    <span class="tag" id="revision">新建</span></div>
+    <form id="template-form">
+      <label>名称 <input id="name" maxlength="100" required></label>
+      <label>展示方式 <select id="variant"><option value="plain">普通知识库</option><option value="agent_note">带核验链接</option></select></label>
+      <label>合成场景生成目标 <textarea id="goal" rows="7" maxlength="2000" required></textarea></label>
+      <div class="actions"><button type="submit">保存模板修订</button><a href="/releases">查看已生成场景 →</a></div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+</div>
 <script>
-  const selection = document.querySelector('#selection');
-  const nameField = document.querySelector('#name');
-  const variant = document.querySelector('#variant');
-  const goal = document.querySelector('#goal');
-  const status = document.querySelector('#status');
-  let templates = [];
-  function fill() {
-    const item = templates.find(template => template.template_id === selection.value);
-    nameField.value = item?.name ?? '';
-    variant.value = item?.variant ?? 'plain';
-    goal.value = item?.goal ?? '';
-    return item;
+const list = document.querySelector('#template-list');
+const search = document.querySelector('#template-search');
+const form = document.querySelector('#template-form');
+const nameField = document.querySelector('#name');
+const variant = document.querySelector('#variant');
+const goal = document.querySelector('#goal');
+const message = document.querySelector('#status');
+let templates = [];
+let selected = '';
+
+function renderList() {
+  const term = search.value.trim().toLocaleLowerCase();
+  const rows = templates.filter(row => (row.name + ' ' + row.goal).toLocaleLowerCase().includes(term));
+  document.querySelector('#template-count').textContent = rows.length + ' 个模板';
+  list.replaceChildren();
+  for (const row of rows) {
+    const button = document.createElement('button');
+    const title = document.createElement('strong');
+    const subtitle = document.createElement('p');
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(row.template_id === selected));
+    title.textContent = row.name;
+    subtitle.textContent = '修订 ' + row.revision + ' · ' + (row.variant === 'agent_note' ? '带核验链接' : '普通知识库');
+    button.append(title, subtitle);
+    button.onclick = () => select(row.template_id);
+    list.append(button);
   }
-  async function refresh(selected = '') {
-    const response = await fetch('/api/templates');
-    if (!response.ok) throw new Error('无法读取模板');
-    templates = await response.json();
-    selection.replaceChildren(new Option('新增模板', ''));
-    for (const item of templates) {
-      selection.add(new Option(item.name + ' · 修订 ' + item.revision, item.template_id));
-    }
-    selection.value = selected;
-    fill();
-  }
-  selection.onchange = fill;
-  document.querySelector('form').onsubmit = async event => {
-    event.preventDefault();
-    const item = templates.find(template => template.template_id === selection.value);
-    const body = {
-      name: nameField.value, variant: variant.value, goal: goal.value,
-      template_id: item?.template_id ?? null, expected_revision: item?.revision ?? 0
-    };
-    const button = event.currentTarget.querySelector('button');
-    button.disabled = true;
-    try {
-      const response = await fetch('/api/templates', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
-      });
-      if (!response.ok) throw new Error(response.status === 409 ? '模板已更新或达到保存上限，请刷新后重试' : '保存失败，请检查字段');
-      const result = await response.json();
-      await refresh(result.template_id);
-      status.textContent = '已保存修订 ' + result.revision;
-    } catch (error) {
-      status.textContent = error.message;
-    } finally {
-      button.disabled = false;
-    }
+  if (!rows.length) list.textContent = '没有匹配的模板。';
+}
+function select(identifier) {
+  selected = identifier;
+  const item = templates.find(row => row.template_id === selected);
+  nameField.value = item?.name ?? '';
+  goal.value = item?.goal ?? '';
+  variant.value = item?.variant ?? 'plain';
+  document.querySelector('#editor-title').textContent = item ? '编辑模板' : '新增模板';
+  document.querySelector('#revision').textContent = item ? '当前修订 ' + item.revision : '新建';
+  message.textContent = '';
+  renderList();
+}
+async function refresh(identifier = '') {
+  const response = await fetch('/api/templates');
+  if (!response.ok) throw new Error('无法读取模板');
+  templates = await response.json();
+  select(identifier || templates[0]?.template_id || '');
+}
+search.oninput = renderList;
+document.querySelector('#new-template').onclick = () => { select(''); nameField.focus(); };
+form.onsubmit = async event => {
+  event.preventDefault();
+  const item = templates.find(row => row.template_id === selected);
+  const body = {
+    name: nameField.value, variant: variant.value, goal: goal.value,
+    template_id:item?.template_id ?? null, expected_revision:item?.revision ?? 0
   };
-  refresh().catch(error => { status.textContent = error.message; });
+  const button = form.querySelector('button[type=submit]');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/templates', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(response.status === 409 ? '修订已变化，请刷新并重新载入模板' : '保存失败，请检查字段');
+    const result = await response.json();
+    search.value = '';
+    await refresh(result.template_id);
+    message.textContent = '已保存修订 ' + result.revision;
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
+refresh().catch(error => { message.textContent = error.message; });
 </script>
-</html>

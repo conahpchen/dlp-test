@@ -369,15 +369,15 @@ def register(app):
                     version=f.version,
                     **deepcopy(f.payload["data"]),
                 )
-                for f in b.get_engine().world.all_current_cls("object")
-                if f.payload["type"] == kind
+                for f in b.get_engine().session_view().all_current_cls("object")
+                if f.payload["type"] == kind and not f.payload["data"].get("graph_retired")
             ]
 
     def find(kind, key):
-        f = b.get_engine().world.current(
+        f = b.get_engine().session_view().current(
             "object", entity_uuid("object", f"{kind}:{key}")
         )
-        if not f:
+        if not f or f.payload["data"].get("graph_retired"):
             raise HTTPException(404, "记录不存在")
         return f
 
