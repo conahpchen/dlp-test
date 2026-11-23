@@ -11,12 +11,14 @@ from dws.ids import entity_uuid
 from generation.templates import GroundedTemplates
 
 
-def prepare(world, hostname, *, version=None):
+def prepare(world, hostname, *, version=None, branch_version=None):
     current = world.meta["world_version"]
     version = current if version is None else version
     if not 1 <= version <= current:
         raise ValueError("DWS projection version is unavailable")
-    view = world.view(version)
+    if branch_version is not None and branch_version not in world.private_versions:
+        raise ValueError("DWS branch projection version is unavailable")
+    view = world.view(version, (branch_version,) if branch_version is not None else ())
     host_id = entity_uuid("host", hostname)
     if view.current("host", host_id) is None:
         raise ValueError("Cannot project an unknown DWS host")
@@ -39,7 +41,10 @@ def prepare(world, hostname, *, version=None):
     for path in ("/etc/hostname", "/etc/hosts", "/etc/passwd", "/etc/os-release"):
         files[path] = dict(kind="file", uid=0, deleted=False,
                            content=templates._system_file(view, session, path) + "\n")
-    return dict(schema=1, world_version=version, hostname=hostname, files=files)
+    snapshot = dict(schema=1, world_version=version, hostname=hostname, files=files)
+    if branch_version is not None:
+        snapshot["branch_version"] = branch_version
+    return snapshot
 
 
 def publish(world, destination, hostname):

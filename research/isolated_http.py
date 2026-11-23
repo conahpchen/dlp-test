@@ -80,7 +80,15 @@ def start(plan):
     projection += "<h1>知识库</h1>"
     for doc in documents:
         projection += "<h2>" + html.escape(doc["path"]) + "</h2><pre>" + html.escape(doc["content"]) + "</pre>"
+    if plan.get("graph_world_version"):
+        projection += f'<p data-world-version="{plan["graph_world_version"]}">DWS 版本</p>'
+        for node in plan["scene"]["nodes"]:
+            projection += "<h2>" + html.escape(node["title"]) + "</h2><pre>" + html.escape(node["body"]) + "</pre>"
     with locked(directory):
+        if plan.get("graph_world_version") and _ready(instance, name):
+            if (instance / "files" / "index.html").read_text(encoding="utf-8") != projection:
+                raise RuntimeUnavailable("Isolated HTTP projection differs from the committed release")
+            return
         if _docker("ps", "-aq", "--filter", "label=org.honeynet.runtime").stdout.strip():
             raise RuntimeUnavailable("Isolated runtime capacity reached")
         if instance.exists():

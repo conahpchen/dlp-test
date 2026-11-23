@@ -61,6 +61,15 @@ def test_chat_wrong_key_401(client):
     assert r.json()["error"]["type"] == "authentication_error"
 
 
+def test_gateway_separates_observation_of_clients_sharing_key_and_label(client):
+    assert _chat(client, "你好", key="shared-unrecognized-key").status_code == 401
+    assert _chat(client, "你好", key="shared-unrecognized-key").status_code == 401
+    second = TestClient(gw.app)
+    assert _chat(second, "你好", key="shared-unrecognized-key").status_code == 401
+    assert sorted(gw.get_engine().online_auth_fails.values()) == [1, 2]
+    assert not gw.get_engine().auth_fails and not gw.get_engine().identity.edges
+
+
 def test_chat_unknown_model_404(client):
     r = _chat(client, "你好", model="gpt-4o")
     assert r.status_code == 404

@@ -1,11 +1,12 @@
 """Authenticated editing of immutable research template revisions."""
 
-from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+from management.layout import fragment, page
 
 from research.api import current_lab
 
@@ -24,8 +25,9 @@ def template_router(require_operator):
     router = APIRouter(dependencies=[Depends(require_operator)])
 
     @router.get("/templates", response_class=HTMLResponse)
-    def page():
-        return (Path(__file__).parent / "templates.html").read_text(encoding="utf-8")
+    def show():
+        body, script = fragment("templates")
+        return page("/templates", "场景模板", "建立可复用的生成目标，并管理模板的追加修订。", body, script=script)
 
     @router.get("/api/templates")
     def index():

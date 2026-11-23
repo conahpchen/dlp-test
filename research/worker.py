@@ -51,8 +51,14 @@ def process_one(lab, model):
         run, session, revision = row
         db.execute("UPDATE adaptation_jobs SET lease=?,leased_until=? WHERE run=? AND session=?",
                    (lease, now + LEASE_SECONDS, run, session))
-    adapt(lab, run, session, model, interval=1, retry_pending=True)
+    result = adapt(lab, run, session, model, interval=1, retry_pending=True)
     with lab.connect() as db:
+        if result["status"] == "budget_exhausted" and db.execute(
+            "SELECT 1 FROM adaptation_jobs WHERE run=? AND session=? AND lease=? AND revision=?",
+            (run, session, lease, revision),
+        ).fetchone():
+            db.execute("INSERT INTO decisions(run,session,payload) VALUES (?,?,?)",
+                       (run, session, json.dumps({"session": session, "status": "budget_exhausted"})))
         db.execute("DELETE FROM adaptation_jobs WHERE run=? AND session=? AND lease=? AND revision=?",
                    (run, session, lease, revision))
         db.execute("UPDATE adaptation_jobs SET lease=NULL,leased_until=NULL "
@@ -69,7 +75,8 @@ def result_status(lab, run, session):
             return "pending"
         result = db.execute("SELECT payload FROM decisions WHERE run=? AND session=? "
                             "ORDER BY id DESC LIMIT 1", (run, session)).fetchone()
-        return json.loads(result[0])["status"] if result is not None else "missing"
+        status = json.loads(result[0])["status"] if result is not None else "missing"
+        return "pending" if status == "publishing" else status
 
 
 async def consume(lab_provider, stop):

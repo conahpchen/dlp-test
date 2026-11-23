@@ -1,15 +1,17 @@
 """Cowrie 3.1.7 adapter loaded in the sensor process only."""
 
 import hashlib
+import hmac
 import json
 import os
 import re
 import runpy
 import sqlite3
 import struct
+from base64 import urlsafe_b64encode
 from contextlib import closing
 from contextvars import ContextVar
-from time import time
+from time import monotonic, time
 import sys
 from pathlib import Path
 
@@ -30,6 +32,46 @@ def install(projection):
     from cowrie.shell.protocol import HoneyPotBaseProtocol
     from cowrie.ssh.session import HoneyPotSSHSession
     from twisted.conch.ssh.common import getNS
+
+    if os.environ.get("HONEYNET_CANARY_HANDOFFS") == "1":
+        from cowrie.ssh.userauth import HoneyPotSSHUserAuthServer
+        from twisted.conch.ssh.common import NS
+        from twisted.conch.ssh.userauth import MSG_USERAUTH_BANNER
+        from twisted.cred.error import UnauthorizedLogin
+        from twisted.internet.defer import fail
+
+        normal_password = HoneyPotSSHUserAuthServer.auth_password
+
+        def verification_password(auth, packet):
+            if auth.user != b"canary-check":
+                return normal_password(auth, packet)
+            try:
+                password = getNS(packet[1:])[0]
+                if packet[:1] != b"\x00" or not re.fullmatch(rb"[A-Za-z0-9_-]{32}", password):
+                    return fail(UnauthorizedLogin())
+                parent = hashlib.sha256(password).hexdigest()
+                with (Path(projection).parent / "handoffs" / (parent + ".json")).open("rb") as stream:
+                    permit = json.loads(stream.read(512))
+                if permit["expires"] <= time():
+                    return fail(UnauthorizedLogin())
+                sensor = auth.transport
+                material = f"ssh:{parent}:{sensor.transportId}".encode()
+                secret = urlsafe_b64encode(hmac.digest(bytes.fromhex(permit["nonce"]), material, "sha256")[:24])
+                child = hashlib.sha256(secret).hexdigest()
+                if permit.get("terminal"):
+                    message = b"Verification recorded.\n"
+                else:
+                    account = {"entry": "mysql", "username": "canary_" + child[:24], "password": secret.decode()}
+                    message = b"Verification handoff " + json.dumps(account).encode() + b"\n"
+                sensor.sendPacket(MSG_USERAUTH_BANNER, NS(message) + NS(b"en"))
+                if sensor.events is not None:
+                    sensor.events.dispatch("cowrie.session.handoff", "Verification handoff sent",
+                                           parent_id=parent, child_id=child)
+            except (KeyError, OSError, ValueError, TypeError, struct.error):
+                pass
+            return fail(UnauthorizedLogin())
+
+        HoneyPotSSHUserAuthServer.auth_password = verification_password
 
     selected = ContextVar("ssh_dws_binding", default=None)
     request_env = HoneyPotSSHSession.request_env
@@ -66,7 +108,10 @@ def install(projection):
                 return 0
             server = getattr(channel.avatar, "server", None)
             filesystem = getattr(server, "fs", None)
-            rebind = snapshot and filesystem and filesystem.dws_world_version != snapshot["world_version"]
+            rebind = snapshot and filesystem and (
+                filesystem.dws_world_version != snapshot["world_version"] or
+                filesystem.dws_branch_version != snapshot.get("branch_version")
+            )
             if rebind and getattr(server, "_dws_started", False):
                 return 0
             token = selected.set(snapshot)
@@ -126,6 +171,31 @@ def install(projection):
 
         HoneyPotBaseProtocol.call_command = call_command
 
+    limit = int(os.environ.get("HONEYNET_SSH_COMMANDS_PER_10S", "0"))
+    if not 0 <= limit <= 10000:
+        raise ValueError("Set HONEYNET_SSH_COMMANDS_PER_10S to an integer from 0 through 10000")
+    if limit:
+        from twisted.conch.ssh.transport import DISCONNECT_BY_APPLICATION
+
+        run_command = HoneyPotBaseProtocol.call_command
+
+        def bounded_command(protocol, pp, cmd, *args):
+            transport = protocol.getProtoTransport()
+            window = int(monotonic() // 10)
+            old_window, used = getattr(transport, "_dws_command_window", (-1, 0))
+            used = used + 1 if window == old_window else 1
+            transport._dws_command_window = (window, used)
+            if used > limit:
+                if used == limit + 1:
+                    if transport.events is not None:
+                        transport.events.dispatch("cowrie.session.policy_limit",
+                                                  "Session ended after command budget was exceeded")
+                    transport.sendDisconnect(DISCONNECT_BY_APPLICATION, b"Command budget exceeded")
+                return
+            return run_command(protocol, pp, cmd, *args)
+
+        HoneyPotBaseProtocol.call_command = bounded_command
+
     initialize = fs.HoneyPotFilesystem.__init__
 
     def parent_dirs(filesystem, path):
@@ -160,6 +230,7 @@ def install(projection):
             filesystem.mkfile(path, uid, uid, len(data), mode)
             filesystem.getfile(path)[fs.A_CONTENTS] = data
         filesystem.dws_world_version = snapshot["world_version"]
+        filesystem.dws_branch_version = snapshot.get("branch_version")
 
     fs.HoneyPotFilesystem.__init__ = initialize_with_dws
 

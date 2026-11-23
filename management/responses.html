@@ -1,0 +1,109 @@
+<div class="master-detail">
+<section class="panel" id="request-editor" hidden>
+<div class="panel-header"><div><h2>提交处置</h2><p>运营账号提交，审核账号批准或驳回。</p></div></div>
+<form id="response-form">
+<label>场景编号 <input name="run" required pattern="[0-9a-f]{32}" maxlength="32" autocomplete="off"></label>
+<label>操作 <select name="kind"><option value="revoke">撤销 Canary</option>
+<option value="detach">撤销证据关联</option><option value="restore">恢复证据关联</option></select></label>
+<label>凭据标识或证据编号 <input name="target" required maxlength="64" autocomplete="off"></label>
+<label>处置原因 <textarea name="reason" required minlength="3" maxlength="300" rows="4"></textarea></label>
+<button type="submit">提交审核</button></form>
+</section>
+<section class="panel"><div class="panel-header"><div><h2>处置记录</h2><p id="role-label">正在读取</p></div>
+<button id="reload-responses" type="button">刷新记录</button></div>
+<p id="response-status" class="status" role="status" aria-live="polite"></p>
+<div id="response-history" class="records"></div></section>
+</div>
+<script>
+const form = document.querySelector('#response-form');
+const statusLine = document.querySelector('#response-status');
+const list = document.querySelector('#response-history');
+const labels = {revoke:'撤销 Canary',detach:'撤销证据关联',restore:'恢复证据关联'};
+const states = {pending:'待审核',applied:'已执行',rejected:'已驳回',conflict:'目标已变更'};
+const params = new URLSearchParams(location.search);
+for (const name of ['run','kind','target']) {
+  if (params.has(name)) form.elements[name].value = params.get(name);
+}
+
+async function request(path, body) {
+  const response = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)} : {});
+  const result = await response.json();
+  if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : '检查输入格式后重试');
+  return result;
+}
+
+function text(tag, value) {
+  const node = document.createElement(tag);
+  node.textContent = value;
+  return node;
+}
+
+async function refreshResponses() {
+  const data = await request('/api/responses');
+  document.querySelector('#request-editor').hidden = data.actor !== 'operator';
+  document.querySelector('#role-label').textContent = data.actor === 'operator' ? '当前身份 运营' : '当前身份 审核';
+  list.replaceChildren();
+  if (!data.requests.length) list.append(text('p','暂无处置记录。'));
+  for (const row of data.requests) {
+    const card = document.createElement('article');
+    card.className = 'record';
+    const meta = text('p', row.run + ' · ' + row.target);
+    meta.className = 'mono';
+    card.append(text('h3', '#' + row.id + ' · ' + labels[row.kind] + ' · ' + states[row.status]), meta,
+      text('p', '申请原因　' + row.reason),
+      text('p', '提交时间　' + new Date(row.requested_at * 1000).toISOString()));
+    if (row.reviewed_at) card.append(text('p', '审核时间　' + new Date(row.reviewed_at * 1000).toISOString()),
+                                    text('p', '审核意见　' + row.review_reason));
+    if (row.status === 'pending' && data.actor === 'reviewer') {
+      const review = document.createElement('form');
+      const reason = document.createElement('input');
+      reason.required = true;
+      reason.minLength = 3;
+      reason.maxLength = 300;
+      reason.placeholder = '输入审核意见';
+      reason.setAttribute('aria-label','审核意见');
+      const approve = text('button', '批准执行');
+      const reject = text('button', '驳回');
+      approve.type = reject.type = 'submit';
+      approve.value = 'approve';
+      reject.value = 'reject';
+      const controls = document.createElement('div');
+      controls.className = 'actions';
+      controls.append(reason, approve, reject);
+      review.append(controls);
+      card.append(review);
+      review.onsubmit = async event => {
+        event.preventDefault();
+        const decision = event.submitter.value;
+        approve.disabled = reject.disabled = true;
+        try {
+          const result = await request('/api/responses/' + row.id + '/decision', {decision,reason:reason.value});
+          await refreshResponses();
+          statusLine.textContent = states[result.status];
+        } catch (error) {
+          statusLine.textContent = error.message;
+          approve.disabled = reject.disabled = false;
+        }
+      };
+    }
+    list.append(card);
+  }
+}
+
+function showError(error) { statusLine.textContent = error.message; }
+form.onsubmit = async event => {
+  event.preventDefault();
+  const button = form.querySelector('button');
+  button.disabled = true;
+  try {
+    await request('/api/responses', Object.fromEntries(new FormData(form)));
+    await refreshResponses();
+    statusLine.textContent = '已提交审核，请使用审核账号操作';
+    form.elements.reason.value = '';
+  } catch (error) { showError(error); }
+  finally { button.disabled = false; }
+};
+document.querySelector('#reload-responses').onclick = () => refreshResponses().catch(showError);
+refreshResponses().catch(showError);
+</script>

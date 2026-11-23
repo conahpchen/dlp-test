@@ -1,11 +1,31 @@
 """Model-driven engagement: extend believable trails while preserving observed links."""
 import json
+from time import time
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from research.generation import ScenePatch, drafting_sources, merge_scene_patch, prompt_json, review_scene
+from research.generation import CLAIM_FORMAT, ScenePatch, drafting_sources, merge_scene_patch, prompt_json, review_scene
 from research.model_input import model_event
+
+DECISION_WINDOW = 3600
+SESSION_DECISIONS = 20
+RUN_DECISIONS = 120
+
+
+def _reserve_decision(db, run, session):
+    window = int(time()) // DECISION_WINDOW
+    scopes = (("run", RUN_DECISIONS), ("session:" + session, SESSION_DECISIONS))
+    for scope, limit in scopes:
+        row = db.execute("SELECT window,count FROM decision_budget WHERE run=? AND scope=?",
+                         (run, scope)).fetchone()
+        if row is not None and row[0] >= window and row[1] >= limit:
+            return False
+    db.execute("DELETE FROM decision_budget WHERE run=? AND window<?", (run, window))
+    for scope, _ in scopes:
+        db.execute("INSERT INTO decision_budget VALUES (?,?,?,1) ON CONFLICT(run,scope) "
+                   "DO UPDATE SET count=count+1", (run, scope, window))
+    return True
 
 
 class EngagementDecision(BaseModel):
@@ -39,6 +59,8 @@ In AI mode author scene_patch with 1-4 node upserts. Omitted nodes are preserved
 Update an existing node to link to each new node; all nodes must remain reachable from the
 existing entry node. Never replace the whole graph or rename existing nodes. Maximum total
 nodes is 8: reuse/update nodes when full. Original synthetic content may omit sources.
+Keep the merged scene within 32 edges and 8 incident edges per node, including incoming
+and outgoing page links, HTTP routes and DWS entity relationships.
 When citing a document, use an exact quote.
 For each existing node that you upsert, keep its old outgoing links and add relevant links.
 Text should offer plausible business leads, not tell the visitor they are in a honeynet.
@@ -63,7 +85,8 @@ def _validate(choice, plan, snapshot):
     if plan.get('origin') == 'ai':
         if decision.scene_patch is None:
             raise ValueError('scene_patch_required')
-        scene = merge_scene_patch(snapshot['current_scene'], decision.scene_patch.model_dump(), plan['documents'])
+        scene = merge_scene_patch(snapshot['current_scene'], decision.scene_patch.model_dump(),
+                                  plan['documents'], plan.get('entity_graph'))
         existing = {node['id']: node for node in snapshot['current_scene']['nodes']}
         for node in decision.scene_patch.nodes:
             if node.id in existing and not set(existing[node.id]['links']) <= set(node.links):
@@ -85,17 +108,35 @@ def _validate(choice, plan, snapshot):
 def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
     with lab.connect() as db:
         plan = lab._plan(db, run)
-        rows = [json.loads(r[0]) for r in db.execute('SELECT payload FROM events WHERE run=? ORDER BY id', (run,))]
-        history = [json.loads(r[0]) for r in db.execute('SELECT payload FROM decisions WHERE run=? ORDER BY id', (run,))]
-        events = [e for e in rows if e['session'] == session]
-        previous = next((d['observed'] for d in reversed(history) if d['session'] == session
-                         and (d['status'] != 'pending' or not retry_pending)), 0)
-        if len(events) - previous < interval or len(history) >= 20:
+        if plan.get('publication_required') and lab._graph_version(db, run) is None:
             return dict(status='not_due')
+        if plan.get('publication_required') and db.execute(
+            "SELECT 1 FROM generated_releases WHERE kind='adaptation' AND subject=? AND status='pending'",
+            (f'{run}:{session}',),
+        ).fetchone():
+            return dict(status='publishing')
+        count = db.execute("SELECT count(*) FROM events WHERE run=? AND json_extract(payload,'$.session')=?",
+                           (run, session)).fetchone()[0]
+        latest = db.execute(
+            "SELECT payload FROM decisions WHERE run=? AND session=? "
+            "AND (?=0 OR json_extract(payload,'$.status')<>'pending') "
+            "AND json_extract(payload,'$.status')<>'budget_exhausted' ORDER BY id DESC LIMIT 1",
+            (run, session, int(retry_pending)),
+        ).fetchone()
+        previous = json.loads(latest[0])['observed'] if latest else 0
+        if count - previous < interval:
+            return dict(status='not_due')
+        if not _reserve_decision(db, run, session):
+            return dict(status='budget_exhausted')
+        rows = db.execute("SELECT payload FROM events WHERE run=? AND json_extract(payload,'$.session')=? "
+                          "ORDER BY id DESC LIMIT 30", (run, session)).fetchall()
+        events = [json.loads(r[0]) for r in reversed(rows)]
         old = db.execute('SELECT revision,payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
         revision = old[0] if old else 0
-        policy = json.loads(old[1]) if old else {}
-        audit = dict(session=session, observed=len(events), evidence_window=[e['event_id'] for e in events[-30:]],
+        from research.artifacts import live_policy
+
+        policy = live_policy(db, old[1:] if old else None)
+        audit = dict(session=session, observed=count, evidence_window=[e['event_id'] for e in events],
                      model=model.name, role='honeynet_interaction', status='pending', previous_revision=revision, attempts=[])
         cursor = db.execute('INSERT INTO decisions(run,session,payload) VALUES (?,?,?)', (run, session, json.dumps(audit)))
         attempt_id = cursor.lastrowid
@@ -104,6 +145,12 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                     current_scene=policy.get('scene') or plan.get('scene'), mode=plan.get('origin', 'fixture'),
                     prior_goal=policy.get('engagement_goal'), initial_node_ids=[n['id'] for n in plan.get('scene', {}).get('nodes', [])])
     instructions = SYSTEM + '\nMandatory JSON schema:\n' + prompt_json(EngagementDecision.model_json_schema())
+    if 'entity_graph' in plan:
+        from research.grounding import related_context
+
+        snapshot['entity_graph'] = related_context(plan['entity_graph'], snapshot['current_scene'], snapshot['events'])
+        instructions += (" Keep existing DWS entity_links; use scene_patch.entity_links for any new supported "
+                         "relationships to the supplied DWS entity IDs.\n" + CLAIM_FORMAT)
     messages = [dict(role='system', content=instructions), dict(role='user', content=prompt_json(snapshot))]
     decision, scene = None, None
     # One bounded repair for AI output, within the already reserved decision slot.
@@ -112,7 +159,7 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
             choice = model.choose(messages)
             decision, scene = _validate(choice, plan, snapshot)
             if scene:
-                audit['scene_review'] = review_scene(model, scene, plan['documents'])
+                audit['scene_review'] = review_scene(model, scene, plan['documents'], plan.get('entity_graph'))
             audit.update(status='applied', decision=decision.model_dump())
             audit['attempts'].append(dict(attempt=attempt + 1, status='accepted'))
             break
@@ -134,13 +181,24 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
         if (current[0] if current else 0) != revision or latest[0] != attempt_id:
             audit['status'] = 'stale'
         if audit['status'] == 'applied':
-            applied = dict(session=session, revision=revision + 1, observed=len(events), action=decision.action,
+            applied = dict(session=session, revision=revision + 1, observed=count, action=decision.action,
                            document_id=decision.document_id, variant='agent_note' if decision.action == 'reveal_clue' else 'plain',
                            actor_hypothesis=decision.actor_hypothesis, evidence_event_ids=decision.evidence_event_ids,
                            input_event_id=snapshot['events'][-1]['event_id'] if snapshot['events'] and snapshot['events'][-1]['what']['kind']=='research.input' else None,
                            response_node=decision.response_node, engagement_goal=decision.engagement_goal, expected_next_nodes=decision.expected_next_nodes,
                            scene=scene.model_dump() if scene else None)
-            db.execute('INSERT OR REPLACE INTO policies VALUES (?,?,?,?,?)', (run, session, revision + 1, len(events), json.dumps(applied)))
+            if plan.get('publication_required') and scene:
+                from research.artifacts import ADAPTATION_TTL, stage
+
+                audit['publication_id'] = stage(
+                    db, 'adaptation', f'{run}:{session}', attempt_id, plan,
+                    {'plan': plan, 'policy': applied, 'attempt': attempt_id},
+                    expires=int(time()) + ADAPTATION_TTL,
+                )
+                audit['status'] = 'publishing'
+            else:
+                db.execute('INSERT OR REPLACE INTO policies VALUES (?,?,?,?,?)', (run, session, revision + 1,
+                                                                                len(events), json.dumps(applied)))
             audit['revision'] = revision + 1
             audit.pop('error_type', None)
             audit.pop('error_code', None)

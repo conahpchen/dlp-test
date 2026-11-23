@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 from contextlib import closing, contextmanager
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from business.atomic_state import read
 from business.storage import location
@@ -22,6 +22,13 @@ class DocumentProposal(BaseModel):
     path: str = Field(pattern=DOCUMENT_PATH)
     content: str = Field(min_length=1, max_length=4096)
     base_version: int = Field(ge=1)
+
+    @field_validator("path")
+    @classmethod
+    def reserve_graph_paths(cls, path):
+        if path.startswith("/kb/graph-"):
+            raise ValueError("Use graph publication to edit graph documents")
+        return path
 
 
 @contextmanager
@@ -58,6 +65,7 @@ def current_documents():
             continue
         document = fact["payload"]
         if (document["kind"] == "file" and not document["canary"] and not document["deleted"]
+                and not document["path"].startswith("/kb/graph-")
                 and re.fullmatch(DOCUMENT_PATH, document["path"])):
             documents.append({"path": document["path"], "content": document.get("content") or ""})
     return {"world_version": state["meta"]["world_version"],
@@ -143,9 +151,14 @@ def _apply(engine, row, checkpoint):
 
 def apply_next(engine, checkpoint):
     """Called under the existing DWS writer lock, with durable retry recovery."""
+    from business import publication_retry as retry
+
     with queue() as db:
-        row = db.execute("SELECT * FROM proposals WHERE status IN ('approved','rollback_pending') "
-                         "ORDER BY rowid LIMIT 1").fetchone()
+        retry.init(db)
+        row = db.execute("SELECT p.* FROM proposals p LEFT JOIN publication_retry r "
+                         "ON r.lane='document' AND r.job=p.id "
+                         "WHERE p.status IN ('approved','rollback_pending') "
+                         "AND COALESCE(r.retry_at,0)<=unixepoch() ORDER BY p.rowid LIMIT 1").fetchone()
     if row is None:
         return
     try:
@@ -154,6 +167,12 @@ def apply_next(engine, checkpoint):
         error = None
     except (ValueError, CommitRejected) as exc:
         status, version, error = "rejected", None, str(exc)
+    except Exception as exc:
+        with queue() as db:
+            if not retry.failure(db, "document", row["id"]):
+                return
+        status, version, error = "failed", None, type(exc).__name__
     with queue() as db:
         db.execute("UPDATE proposals SET status=?,result_version=?,error=? WHERE id=? AND status=?",
                    (status, version, error, row["id"], row["status"]))
+        retry.clear(db, "document", row["id"])

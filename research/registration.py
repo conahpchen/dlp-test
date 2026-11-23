@@ -136,8 +136,14 @@ def evidence(lab, run):
     for event in events:
         what = event["what"]
         resource = what.get("resource")
-        if what["kind"] == "research.input" and resource not in known_resources:
-            resource = "未识别的场景路径"
+        if what["kind"] == "research.input":
+            observed = what.get("observed_scene")
+            if isinstance(observed, dict):
+                resource = observed.get("resource") or (
+                    resource if resource in {"index", "interact", *initial_titles} else "未识别的场景路径"
+                )
+            elif resource not in known_resources:
+                resource = "未识别的场景路径"
         title = what.get("title")
         if not title and what["kind"] == "research.delivery" and not what.get("policy_revision"):
             title = initial_titles.get(resource)

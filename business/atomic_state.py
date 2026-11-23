@@ -28,7 +28,18 @@ def _store(db, schema, payload):
     db.execute(f"INSERT OR REPLACE INTO {schema}.active_snapshot VALUES (1,?)", (payload,))
 
 
-def commit(checkpoint, state, projection=None, snapshot=None):
+def archived_graph(path, version):
+    path = Path(path)
+    if path.suffix != ".sqlite" or not path.is_file():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='archived_graphs'").fetchone():
+            return None
+        row = db.execute("SELECT fact FROM archived_graphs WHERE world_version=?", (version,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def commit(checkpoint, state, projection=None, snapshot=None, *, archived=()):
     checkpoint = Path(checkpoint).resolve()
     if projection is not None:
         projection = Path(projection).resolve()
@@ -53,6 +64,11 @@ def commit(checkpoint, state, projection=None, snapshot=None):
             db.execute(f"PRAGMA {schema}.synchronous=FULL")
         with db:
             db.execute("BEGIN IMMEDIATE")
+            if archived:
+                db.execute("CREATE TABLE IF NOT EXISTS archived_graphs "
+                           "(world_version INTEGER PRIMARY KEY, fact TEXT NOT NULL)")
+                db.executemany("INSERT INTO archived_graphs VALUES (?,?)",
+                               [(fact["world_version"], json.dumps(fact, ensure_ascii=False)) for fact in archived])
             _store(db, "main", private_payload)
             if projection is not None:
                 _store(db, "ssh", public_payload)

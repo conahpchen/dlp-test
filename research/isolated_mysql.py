@@ -32,7 +32,7 @@ INSERT INTO collab_core.catalog_records VALUES (1,1,'ready'),(2,1,'archived');
 
 def seed_sql(plan):
     documents = plan["documents"]
-    version = int(plan["world_version"])
+    version = int(plan.get("graph_world_version") or plan["world_version"])
     if not 1 <= len(documents) <= 3 or version < 1:
         raise RuntimeUnavailable("Invalid isolated DWS projection")
     values = []
@@ -44,9 +44,18 @@ def seed_sql(plan):
         values.append(f"( {index}, CONVERT(X'{path.hex()}' USING utf8mb4), "
                       f"CONVERT(X'{fact.hex()}' USING utf8mb4))")
     schema, records = SEED_SQL.rsplit("INSERT INTO", 1)
-    return (schema + f"INSERT INTO collab_core.projection VALUES ({version});\n"
-            + "INSERT INTO collab_core.catalog VALUES " + ",".join(values) + ";\n"
-            + "INSERT INTO" + records)
+    content = (schema + f"INSERT INTO collab_core.projection VALUES ({version});\n"
+               + "INSERT INTO collab_core.catalog VALUES " + ",".join(values) + ";\n"
+               + "INSERT INTO" + records)
+    if plan.get("graph_world_version"):
+        rows = []
+        for node in plan["scene"]["nodes"]:
+            texts = (node["id"], node["title"], node["body"])
+            rows.append("(" + ",".join(f"CONVERT(X'{value.encode().hex()}' USING utf8mb4)" for value in texts) + ")")
+        content += ("CREATE TABLE collab_core.generated_nodes (node_id VARCHAR(32) PRIMARY KEY, "
+                    "title VARCHAR(120), body TEXT);\nINSERT INTO collab_core.generated_nodes VALUES "
+                    + ",".join(rows) + ";\n")
+    return content
 
 
 def _docker(*args, timeout=15, check=True):
@@ -137,6 +146,9 @@ def start(plan):
     image, directory, instance, name = _instance(run)
     with locked(directory):
         if _inspect(name):
+            if (plan.get("graph_world_version") and _ready(instance, name)
+                    and (instance / "seed.sql").read_text(encoding="utf-8") == contents):
+                return
             raise RuntimeUnavailable("This isolated release already has an instance")
         existing = _docker("ps", "-aq", "--filter", "label=org.honeynet.runtime").stdout.strip()
         if existing:

@@ -67,16 +67,17 @@ def test_real_cowrie_keeps_old_dws_projection(demo_seed, tmp_path, monkeypatch):
         "--logger", "cowrie.python.logfile.stdoutLogger", "cowrie",
     ]
     container = subprocess.check_output([
-        "docker", "run", "-d", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "docker", "run", "--pull=never", "-d", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "-p", "127.0.0.1::2222",
         "-e", "HONEYNET_COWRIE_PROJECTION=/projection/world.sqlite",
         "-e", "COWRIE_HONEYPOT_HOSTNAME=web01",
         "-e", "RESEARCH_AUTOMATIC_DECOYS=1",
+        "-e", "HONEYNET_SSH_COMMANDS_PER_10S=80",
         "--mount", f"type=bind,source={hook},target=/dws-hook,readonly",
         "--mount", f"type=bind,source={directory},target=/projection,readonly",
         "--mount", f"type=bind,source={userdb},target=/cowrie/cowrie-git/etc/userdb.txt,readonly",
         image, *command,
-    ], text=True, timeout=20).strip()
+    ], text=True, timeout=40).strip()
     sessions = []
     try:
         address = subprocess.check_output(["docker", "port", container, "2222/tcp"], text=True, timeout=5)
@@ -175,6 +176,7 @@ else:
 
                     history = json.loads(messages[-1]["content"])["activities"]
                     assert history[-1] == "inspect_logs"
+                    assert "choose the intent of the most recent explicit lookup" in messages[0]["content"]
                     return {"intent": "log_review", "title": "service_inventory",
                             "note": "Inventory refresh completed."}
 
@@ -220,8 +222,23 @@ else:
                                            stderr=subprocess.STDOUT, text=True, timeout=5)
             pytest.fail((result + logs).replace(binding["binding"], "[binding]"))
         if isolated:
+            from business.graph_publications import GraphProposal, apply_next, submit, transition
             from entries.mysql.app import QUERY
             from research.bindings import HEADER
+
+            graph = submit(GraphProposal.model_validate(dict(
+                base_version=binding["world_version"], scope="branch",
+                nodes=[dict(id="runtime_notes", kind="document", content="Synthetic graph runtime notes"),
+                       dict(id="runtime_catalog", kind="database")],
+                edges=[dict(source="runtime_notes", target="runtime_catalog")],
+            )))
+            transition(graph["id"], "approve")
+            apply_next(engine, lambda current: persist(current, [], []))
+            branch = issue(lab, run, graph["id"], target="ssh")
+            assert branch["branch_version"] > branch["world_version"]
+            path = "/kb/graph-runtime_notes.md"
+            assert "Synthetic graph runtime notes" not in commands(fresh, f"cat {path}")
+            assert "Synthetic graph runtime notes" in commands(connect(branch["binding"]), f"cat {path}")
 
             successor = lab.create(engine.world, "plain", model=SceneModel())["run_id"]
             lab.activate(successor)
@@ -255,13 +272,78 @@ else:
                 with connect_mysql() as db, db.cursor() as cursor:
                     cursor.execute(QUERY)
                     assert cursor.fetchone()[1] == "MySQL 8.0.99"
+                endpoint = f"/api/evidence/runs/{run}/bindings"
+                grants = {}
+                for target in ("web", "mysql", "llm"):
+                    response = dashboard.post(endpoint, params={"publication": graph["id"], "target": target},
+                                              auth=auth, json={})
+                    assert response.status_code == 201, response.text
+                    grants[target] = response.json()
+                assert len({row["binding"] for row in [branch, *grants.values()]}) == 4
+                overlay = {HEADER: grants["web"]["binding"]}
+                graph_path = f"/decoy/{run}/world-graph"
+                assert public.get(graph_path, headers=issued).json() == {"graphs": []}
+                assert public.get(f"/decoy/{successor}/world-graph", headers=overlay).status_code == 404
+                web_graph, = public.get(graph_path, headers=overlay).json()["graphs"]
+                assert web_graph["edges"] == [{"source": "runtime_notes", "target": "runtime_catalog"}]
+                assert web_graph["nodes"][0]["content"] == "Synthetic graph runtime notes"
+                assert web_graph["version"] == branch["branch_version"]
+                assert public.get(graph_path, headers={HEADER: "unknown"}).status_code == 404
+                with connect_mysql(grants["mysql"]["mysql_user"]) as db, db.cursor() as cursor:
+                    cursor.execute(QUERY)
+                    assert any(row[0] == "graph_runtime_catalog" for row in cursor.fetchall())
+                with connect_mysql(binding["mysql_user"]) as db, db.cursor() as cursor:
+                    cursor.execute(QUERY)
+                    assert all(row[0] != "graph_runtime_catalog" for row in cursor.fetchall())
+                assert public.get(graph_path, headers={HEADER: grants["llm"]["binding"]}).status_code == 404
+                assert public.get("/v1/models", headers=dict(headers, **overlay)).status_code == 404
+                import pymysql
+
+                with pytest.raises(pymysql.OperationalError):
+                    connect_mysql("catalog_" + grants["web"]["binding"])
+                ai_overlay = {HEADER: grants["llm"]["binding"]}
+                for token, expected in [(issued, False), (ai_overlay, True), ({}, False)]:
+                    chat_headers = dict(headers, **token) if token else dict(headers, **{"X-Session": "fresh-ai"})
+                    reply = public.post("/v1/chat/completions", headers=chat_headers, json={
+                        "model": "corp-llm-7b" if token else "corp-new",
+                        "messages": [{"role": "user", "content": "你好"}],
+                    })
+                    assert reply.status_code == 200, reply.text
+                    output = reply.json()["choices"][0]["message"]["content"]
+                    assert (path in output) == expected, output
                 assert public.get("/api/research/status", headers=control_headers).status_code == 404
                 assert control.get("/api/research/status", headers=control_headers).status_code == 200
                 assert control.get("/v1/models").status_code == 404
                 assert public.get("/api/runtime", auth=auth).status_code == 404
                 assert dashboard.get("/api/runtime").status_code == 401
-                assert dashboard.get("/api/runtime", auth=auth).json()["world_version"] == engine.world.meta["world_version"]
+                persisted = read(tmp_path / "private" / "world.sqlite")
+                assert dashboard.get("/api/runtime", auth=auth).json()["world_version"] == persisted["meta"]["world_version"]
                 assert "rotate ssh keys" in commands(bound, "cat /home/deploy/notes.txt")
+
+            limited = connect()
+            assert "__projection_done__" in commands(limited, "echo ssh-ready")
+            # Keep stdin open so the client can only exit here on server termination.
+            limited.stdin.write(b"echo harmless-check\n" * 180)
+            limited.stdin.flush()
+            output, end = b"", time.monotonic() + 12
+            while select.select([limited.stdout], [], [], max(0, end - time.monotonic()))[0]:
+                chunk = os.read(limited.stdout.fileno(), 16384)
+                if not chunk:
+                    break
+                output += chunk
+                if time.monotonic() >= end:
+                    break
+            limited.wait(timeout=1)
+            assert limited.returncode == 255 and b"Command budget exceeded" in output
+            raw = tmp_path / "policy-limit.json"
+            subprocess.run(["docker", "cp", f"{container}:/cowrie/cowrie-git/var/log/cowrie/cowrie.json",
+                            str(raw)], check=True, timeout=10)
+            from audit.alerts import read_alerts
+            from entries.cowrie.bridge import main as bridge
+
+            monkeypatch.setenv("HONEYNET_ALERTS_FILE", str(tmp_path / "limits.sqlite"))
+            bridge(["--in", str(raw), "--alerts-only"])
+            assert any(row["kind"] == "session_ended" for row in read_alerts("ssh")["alerts"])
     finally:
         for child in sessions:
             child.terminate()

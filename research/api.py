@@ -210,8 +210,15 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
 
     @app.api_route('/decoy/{run_id}/{resource:path}', methods=['GET', 'POST'])
     async def decoy(run_id: str, resource: str, request: Request):
+        from audit.flow_evidence import observe_http
         from research.inputs import capture, clean_text
+        from research.service_planner import PROBE_HEADER
         from starlette.concurrency import run_in_threadpool
+
+        if probe := request.headers.get(PROBE_HEADER):
+            result = await run_in_threadpool(current_lab().probe_release, run_id, resource, request.method, probe)
+            return JSONResponse(result or {"error": "接口不存在"}, status_code=200 if result else 404,
+                                headers={"Cache-Control": "no-store"})
 
         session = request.cookies.get('research_session', '')
         if not re.fullmatch('[a-f0-9]{32}', session):
@@ -221,6 +228,9 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         try:
             lab = current_lab()
             plan = await run_in_threadpool(lab.plan, run_id)
+            if plan.get('publication_required') and not await run_in_threadpool(lab.graph_version, run_id):
+                return JSONResponse({'error': '接口不存在'}, status_code=404)
+            await run_in_threadpool(observe_http, 'web', session, request)
             visitor_input = await capture(request)
             is_input = (request.method == 'POST' or bool(visitor_input['query'])
                         or resource.startswith('service/'))
@@ -228,15 +238,16 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                 'RESEARCH_ADAPTIVE_ENABLED', '1' if plan.get('origin') == 'ai' else '0') == '1')
             outcome = None
             queued = False
+            event = None
             background_mode = surface == 'visitor' and async_adaptation()
             if is_input:
                 event = await run_in_threadpool(lab.observe, run_id, session, peer, agent,
                                        dict(kind='research.input', method=request.method,
                                             resource=clean_text(resource)[:160], input=visitor_input))
-                if (background_mode and plan.get('origin') == 'ai'
+                if (event and background_mode and plan.get('origin') == 'ai'
                         and model_event(event, plan)['what']['activity'] not in ('unknown', 'truncated')):
                     queued = await run_in_threadpool(enqueue, lab, run_id, session)
-                if enabled and plan.get('origin') == 'ai':
+                if event and enabled and plan.get('origin') == 'ai':
                     from research.controller import adapt
                     from research.model import Model
                     try:
@@ -247,7 +258,9 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                         outcome = await run_in_threadpool(adapt, lab, run_id, session, model, 1)
             policy_now = await run_in_threadpool(lab.policy, run_id, session)
             if resource == 'interact':
-                if request.method == 'POST' and queued:
+                if request.method == 'POST' and (event is None or (outcome or {}).get('status') == 'budget_exhausted'):
+                    status, body = await run_in_threadpool(lab.visit, run_id, 'index', session, peer, agent)
+                elif request.method == 'POST' and queued:
                     status, body = 202, dict(status='queued', result=f'/decoy/{run_id}/interact')
                 elif request.method == 'GET' and background_mode:
                     job_status = await run_in_threadpool(result_status, lab, run_id, session)
@@ -263,6 +276,8 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                         status, body = 202, dict(status='pending')
                     elif job_status == 'missing':
                         status, body = 404, dict(error='未找到查询任务')
+                    elif job_status == 'budget_exhausted':
+                        status, body = await run_in_threadpool(lab.visit, run_id, 'index', session, peer, agent)
                     else:
                         status, body = 503, dict(error='当前查询暂无法完成')
                 elif request.method != 'POST':
@@ -273,7 +288,7 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                     status, body = await run_in_threadpool(lab.visit, run_id, 'scene/' + policy_now['response_node'], session, peer, agent)
             else:
                 status, body = await run_in_threadpool(lab.visit, run_id, resource, session, peer, agent, request.method, require_receipt=True)
-            if enabled and not is_input:
+            if enabled and not is_input and await run_in_threadpool(lab.capture_available, run_id):
                 from research.controller import adapt
                 from research.model import Model
                 try:
@@ -284,9 +299,6 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
                     await run_in_threadpool(adapt, lab, run_id, session, model)
         except KeyError:
             return JSONResponse({'error': '接口不存在'}, status_code=404)
-        except OverflowError:
-            return JSONResponse({'error': '请求预算已用尽'}, status_code=429,
-                                headers={'Retry-After': '3600', 'Cache-Control': 'no-store'})
         policy = current_lab().policy(run_id, session)
         scene = policy.get('scene')
         lead = None
@@ -295,6 +307,12 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
             lead = next((node for node in policy.get('expected_next_nodes', []) if node in ids), None)
         lure_link = body.get('verification_link')
         receipt = None
+        if status == 200 and body.get('next_hop'):
+            from research.handoffs import delivered
+
+            account = body['next_hop']
+            child = hashlib.sha256((account.get('password') or account['verification_key']).encode()).hexdigest()
+            receipt = BackgroundTask(delivered, lab, child)
         if status == 200 and lure_link:
             body['registration'] = {'optional': True, 'href': f'/decoy/{run_id}/register'}
             token = lure_link.rsplit('/', 1)[-1]
@@ -305,13 +323,10 @@ def install_routes(app, engine_provider, event_provider=lambda: [], *, surface='
         response = JSONResponse(body, status_code=status, background=receipt,
                                 headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
         if lead:
-            response.headers['Link'] = f'</decoy/{run_id}/scene/{lead}>; rel="related"'
-            try:
-                current_lab().observe(run_id, session, request.client.host if request.client else 'unknown',
-                                      request.headers.get('user-agent', '')[:256],
-                                      dict(kind='research.lead', resource='related', offered_nodes=[lead], policy_revision=policy['revision']))
-            except OverflowError:
-                pass
+            offered = dict(kind='research.lead', resource='related', offered_nodes=[lead],
+                           policy_revision=policy['revision'])
+            if await run_in_threadpool(lab.observe, run_id, session, peer, agent, offered):
+                response.headers['Link'] = f'</decoy/{run_id}/scene/{lead}>; rel="related"'
         response.set_cookie('research_session', session, httponly=True, samesite='strict',
                             secure=request.url.scheme == 'https', path=f'/decoy/{run_id}/')
         if 'text/html' in request.headers.get('accept', '') and status == 200:

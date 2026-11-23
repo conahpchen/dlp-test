@@ -1,50 +1,69 @@
-<!doctype html>
-<html lang="zh-CN">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>会话证据 · 蜜网管理</title>
-<style>
-body{font:16px system-ui;margin:0;background:#eef2f5;color:#1c2938}
-header{padding:1rem 2rem;background:#17283f;color:white} header a{color:white}
-main{max-width:65rem;margin:2rem auto;padding:0 1rem}
-select,button{padding:.4rem;font:inherit} td,th{text-align:left;padding:.4rem;overflow-wrap:anywhere}
-article{background:white;padding:1rem;margin:1rem 0;border-radius:.5rem}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1rem}
-dl div{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin:.35rem 0}
-dd{margin:0;overflow-wrap:anywhere}
-.table-scroll{overflow-x:auto}
-tr:target{background:#d9eeeb}
-</style>
-<header><a href="/">返回运行总览</a></header>
-<main>
-<h1>会话证据</h1>
-<label>研究场景 <select id="runs"></select></label>
-<button id="refresh" type="button">刷新证据</button>
-<p id="status" role="status"></p>
-<h2>服务发布</h2><div id="release"></div>
-<h2>Agent 登记</h2><div id="registrations"></div>
-<h2>Canary 命中</h2><div id="canaries"></div>
-<h2>Web 事件时间线</h2>
-<label>筛选会话 <select id="sessions"><option value="">全部会话</option></select></label>
-<p>下方 AI 生成记录会链接到它参考的事件。序号用于表示先后。</p>
-<div class="table-scroll"><table>
-<thead><tr><th>逻辑序号</th><th>会话</th><th>发生了什么</th><th>请求或交付内容</th><th>HTTP 状态</th><th>DWS 版本</th></tr></thead>
-<tbody id="timeline"></tbody>
-</table></div>
-<h2>AI 生成记录</h2><div id="generation"></div>
-</main>
+<section class="panel evidence-header">
+<div class="toolbar">
+  <label class="field">研究场景 <select id="runs"></select></label>
+  <label class="field" data-section="session">筛选会话 <select id="sessions"><option value="">全部会话</option></select></label>
+  <button id="refresh" type="button">刷新记录</button>
+  <span class="tag">DWS <span id="run-version">—</span></span>
+</div>
+<p id="status" class="status" role="status" aria-live="polite">正在读取场景</p></section>
+<section class="metrics" data-section="session" aria-label="场景证据统计">
+<article class="metric mint"><h2>Web 会话</h2><strong id="metric-sessions">—</strong><p>按研究场景去重</p></article>
+<article class="metric"><h2>时间线事件</h2><strong id="metric-events">—</strong><p>记录的访问、请求和投放</p></article>
+<article class="metric"><h2>AI 决策记录</h2><strong id="metric-decisions">—</strong><p>包含通过和拒绝结果</p></article></section>
+<section class="panel" data-section="session"><div class="panel-header"><div><h2>Web 事件时间线</h2>
+<p>查看请求了什么、服务返回什么，以及对应的 DWS 版本。</p><p id="capture-status"></p></div><a href="/canary">查看 Canary →</a></div>
+<!-- timeline tools --><div class="table-scroll" id="timeline-table"><table>
+<thead><tr><th>序号</th><th>会话</th><th>发生了什么</th><th>请求或交付内容</th><th>HTTP 状态</th><th>DWS 版本</th></tr></thead>
+<tbody id="timeline"></tbody></table></div></section>
+<section class="panel" data-section="session release"><div class="panel-header"><div><h2>AI 生成记录</h2>
+<p>查看模型提议新增的内容、状态和所依据的事件。</p></div></div><div class="records" id="generation"></div></section>
+<section class="panel" data-section="session"><div class="panel-header"><div><h2>Agent 登记</h2>
+<p>分别查看自报信息、服务器观测和行为推断。</p></div></div><div class="records" id="registrations"></div></section>
+<section class="metrics" data-section="canary" aria-label="Canary 核查">
+<article class="metric"><h2>已签发凭据</h2><strong id="metric-issued">—</strong><p>最近保留的 100 条列表记录</p></article>
+<article class="metric mint"><h2>已交付凭据</h2><strong id="metric-receipts">—</strong><p>列表中有响应发送回执</p></article>
+<article class="metric warm"><h2>使用证据</h2><strong id="metric-hits">—</strong><p>当前场景已记录的命中</p></article></section>
+<section class="panel" data-section="canary"><div class="panel-header"><div><h2>凭据与交付回执</h2>
+<p>显示脱敏凭据编号、来源会话、有效期和发送时间。所有时间为 UTC。</p></div></div>
+<div class="table-scroll"><table><thead><tr><th>凭据编号</th><th>诱饵</th><th>来源会话</th><th>DWS</th><th>状态</th><th>响应回执</th><th>有效期</th><th>处置</th></tr></thead>
+<tbody id="receipts"></tbody></table></div></section>
+<section class="panel" data-section="canary"><div class="panel-header"><div><h2>后续使用与关联修订</h2>
+<p>依据同一标记追踪使用记录。现实身份需要更多证据。</p></div></div><div class="records" id="canaries"></div></section>
+<section class="metrics" data-section="release">
+<article class="metric mint"><h2>场景状态</h2><strong id="metric-active">—</strong><p>当前所选场景</p></article>
+<article class="metric"><h2>已声明能力</h2><strong id="metric-capabilities">—</strong><p>已保存的发布清单</p></article>
+<article class="metric warm"><h2>准备和检查记录</h2><strong id="metric-attempts">—</strong><p>包含失败和恢复记录</p></article></section>
+<section class="panel" data-section="release"><div class="panel-header"><div><h2>服务发布与依赖</h2>
+<p>核对所选场景的能力、审批和检查结果。</p></div><a href="/operations">检查入口健康 →</a></div><div id="release"></div></section>
+<section class="metrics" data-section="chain" aria-label="链路统计">
+<article class="metric mint"><h2>有使用记录的已交付标记</h2><strong id="chain-sources">—</strong><p>按来源标记去重</p></article>
+<article class="metric"><h2>有效证据关联</h2><strong id="chain-uses">—</strong><p>最近 100 条使用记录内</p></article>
+<article class="metric warm"><h2>命中入口类型</h2><strong id="chain-entries">—</strong><p>按协议入口去重</p></article></section>
+<section class="panel" data-section="chain">
+<div class="panel-header"><div><h2>交付来源与后续命中</h2><p>同一标记出现在多个入口时，分别显示从交付来源到各个入口的证据。认定现实身份需结合独立证据。</p></div>
+<a id="chain-receipts-link" href="/canary">核对交付回执 →</a></div>
+<div class="toolbar"><label>命中入口 <select id="chain-filter"><option value="">全部入口</option>
+<option value="web">Web</option><option value="ssh">SSH</option><option value="mysql">MySQL</option>
+<option value="llm">模拟 AI API</option></select></label>
+<label><input type="checkbox" id="chain-active">只看有效关联</label></div>
+<div class="records" id="chains"></div></section>
 <script>
 const runs = document.querySelector('#runs');
 const statusLine = document.querySelector('#status');
 const registrations = document.querySelector('#registrations');
 const canaries = document.querySelector('#canaries');
 const timeline = document.querySelector('#timeline');
+const chainEntries = {web:'Web',ssh:'SSH',mysql:'MySQL',llm:'模拟 AI API'};
+const chainFilter = document.querySelector('#chain-filter');
+const chainActive = document.querySelector('#chain-active');
+let chainRecords = [];
 const releasePanel = document.querySelector('#release');
 const fieldNames = {
   framework:'框架', model_family:'模型系列', instance_kind:'运行类型', task:'任务类别',
   registration_id:'登记编号', session:'观察会话', received_at:'接收时间', world_version:'世界版本',
   recorded_event_count:'记录事件数', hypothesis:'行为假设', confidence:'置信度', evidence_use:'证据编号',
-  credential_id:'凭据标识', entry:'入口', associated:'有效关联', recorded_at:'观测时间', revision:'修订号'
+  credential_id:'凭据标识', entry:'入口', associated:'有效关联', recorded_at:'观测时间', revision:'修订号',
+  sent_at:'响应发送时间'
 };
 async function get(path) {
   const response = await fetch(path);
@@ -69,17 +88,77 @@ function group(title, fields) {
   section.append(list);
   return section;
 }
+function handoffPolicy(run, route) {
+  const form = document.createElement('form');
+  form.className = 'toolbar';
+  const options = document.createElement('input');
+  options.value = route.join(' → ');
+  options.required = true;
+  options.maxLength = 64;
+  const caption = document.createElement('label');
+  caption.className = 'field';
+  caption.append('新签发 Canary 的路径', options);
+  const save = document.createElement('button');
+  save.textContent = '保存路径';
+  const help = document.createElement('p');
+  help.textContent = '入口代号为 web、ssh、mysql、llm。用箭头分隔，填写 web 则到 Web 核验为止。';
+  const result = document.createElement('span');
+  result.setAttribute('role', 'status');
+  form.append(caption, save, help, result);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    save.disabled = true;
+    result.textContent = '';
+    try {
+      const response = await fetch('/api/evidence/runs/' + encodeURIComponent(run) + '/handoff-policy', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({route: options.value.trim().toLowerCase().split(/\s*(?:→|,|，|->)\s*/)})
+      });
+      if (!response.ok) {
+        result.textContent = response.status === 422 ? '此路径不受支持，请检查入口顺序。' : '保存路径失败。';
+        return;
+      }
+      options.value = (await response.json()).route.join(' → ');
+      result.textContent = '已保存。下次签发的 Canary 将使用此路径。';
+    } catch (error) {
+      result.textContent = '保存路径失败。';
+    } finally {
+      save.disabled = false;
+    }
+  };
+  return form;
+}
 function renderRelease(run, release) {
   const card = document.createElement('article');
   const state = document.createElement('p');
   state.textContent = release.active ? '当前发布' : '未激活';
+  state.className = release.active ? 'tag ok' : 'tag';
+  card.className = 'record';
   card.append(state);
+  card.append(handoffPolicy(run, release.handoff_route));
   if (release.manifest) {
     for (const capability of release.manifest.capabilities) {
       const line = document.createElement('p');
       line.textContent = 'L' + capability.level + ' · ' + capability.protocol + ' · ' + capability.exposure;
       card.append(line);
     }
+  }
+  if (release.graph) {
+    const graph = document.createElement('details');
+    const heading = document.createElement('summary');
+    heading.textContent = 'DWS 基线 v' + release.graph.base + ' · 图发布 v' + release.graph.version;
+    graph.append(heading);
+    const names = new Map(release.graph.nodes.map(node => [node.id, node.label || node.title || node.path || node.id]));
+    const labels = {link:'章节链接', serves:'提供模拟接口', hosted_on:'部署于', supports:'支撑',
+      documents:'文档说明', reviews:'核验', uses:'使用'};
+    const list = document.createElement('ul');
+    for (const edge of release.graph.edges) {
+      const item = document.createElement('li');
+      item.textContent = names.get(edge.source) + ' → ' + (labels[edge.kind] || edge.kind) + ' → ' + names.get(edge.target);
+      list.append(item);
+    }
+    graph.append(list);
+    card.append(graph);
   }
   for (const attempt of release.attempts) {
     const line = document.createElement('p');
@@ -98,6 +177,7 @@ function renderRelease(run, release) {
       card.append(caption);
     }
     button.onclick = async () => {
+      if (action === 'rollback' && !window.confirm('将当前发布切回上一可用场景？')) return;
       button.disabled = true;
       try {
         const response = await fetch('/api/evidence/runs/' + encodeURIComponent(run) + '/release/' + action + '?approve_isolated=' + isolated.checked, {
@@ -105,7 +185,7 @@ function renderRelease(run, release) {
         });
         const result = await response.json();
         await refresh();
-        if (!response.ok) statusLine.textContent = result.detail;
+        statusLine.textContent = response.ok ? '发布状态已更新' : result.detail;
       } catch (error) {
         statusLine.textContent = '无法更新发布状态';
       } finally {
@@ -129,7 +209,8 @@ const resources = {
   '/api/databases':'数据库目录', '/api/assets':'资产列表', '/api/login':'登录',
   'unmatched':'未匹配已知路由', 'beacon':'核验链接'
 };
-const decisionNames = {applied:'已应用到会话', rejected:'未通过校验', stale:'已过期', pending:'处理中'};
+const decisionNames = {applied:'已应用到会话', rejected:'未通过校验', stale:'已过期', pending:'处理中',
+  publishing:'等待 DWS 发布', budget_exhausted:'模型限额已用完，继续提供原有内容'};
 function renderTimeline() {
   if (!selectedEvidence) return;
   const filter = sessions.value;
@@ -142,6 +223,7 @@ function renderTimeline() {
     row.id = 'event-' + event.event_id;
     const label = resources[event.resource];
     const target = [event.method, event.title || label, event.resource].filter(Boolean).join(' · ');
+    row.tabIndex = -1;
     const values = ['#'+positions.get(event.event_id), event.session, eventNames[event.kind] || event.kind,
       target || '未记录', event.status ?? '—', event.world_version ?? '—'];
     for (const value of values) {
@@ -154,6 +236,7 @@ function renderTimeline() {
   generation.replaceChildren();
   for (const record of selectedEvidence.generation.filter(matches)) {
     const item = document.createElement('article');
+    item.className = 'record';
     item.append(group(decisionNames[record.status] || record.status, {
       '会话': record.session, '推测意图': record.intent || '未记录',
       '提议新增或更新页面': record.nodes.map(node => node.title + '（' + node.id + '）').join('、') || '无',
@@ -166,6 +249,13 @@ function renderTimeline() {
       const link = document.createElement('a');
       link.href = '#event-' + id;
       link.textContent = '#' + positions.get(id);
+      if (document.body.dataset.view !== 'session') {
+        const params = new URLSearchParams({run: runs.value, session: record.session});
+        link.href = '/evidence?' + params + '#event-' + id;
+      } else {
+        link.onclick = () => document.querySelector('#timeline-table')
+          .dispatchEvent(new CustomEvent('reveal-row', {detail:'event-' + id}));
+      }
       evidence.append(link, ' ');
     }
     item.append(evidence);
@@ -175,10 +265,110 @@ function renderTimeline() {
     const row = timeline.insertRow();
     const cell = row.insertCell();
     cell.colSpan = 6;
+    row.dataset.placeholder = '';
     cell.textContent = '暂无事件';
   }
   if (!generation.childElementCount) generation.textContent = '这个范围内暂无 AI 生成记录';
 }
+function responseLink(run, kind, target, label) {
+  const link = document.createElement('a');
+  link.href = '/responses?' + new URLSearchParams({run,kind,target});
+  link.textContent = label;
+  return link;
+}
+
+function appendNetwork(container, flows) {
+  if (!flows?.length) return;
+  const details = document.createElement('details');
+  const title = document.createElement('summary');
+  title.textContent = 'VPC Flow 网络证据 · ' + flows.length;
+  details.append(title);
+  for (const flow of flows) {
+    const line = document.createElement('p');
+    const start = new Date(flow.started * 1000).toISOString();
+    const end = new Date(flow.ended * 1000).toISOString();
+    line.textContent = flow.interface + ' · ' + start + ' → ' + end +
+      ' · ' + flow.packets + ' 个包 · ' + flow.bytes + ' 字节';
+    details.append(line);
+  }
+  container.append(details);
+}
+function renderChains() {
+  const root = document.querySelector('#chains');
+  root.replaceChildren();
+  for (const path of chainRecords) {
+    const uses = path.uses.filter(use => (!chainFilter.value || chainFilter.value === use.entry) &&
+      (!chainActive.checked || use.associated));
+    if (!uses.length) continue;
+    const section = document.createElement('article');
+    section.className = 'record chain';
+    section.id = 'chain-' + path.credential_id;
+    const header = document.createElement('div');
+    header.className = 'split-header';
+    const heading = document.createElement('h3');
+    heading.textContent = path.resource;
+    const identifier = document.createElement('code');
+    identifier.textContent = path.credential_id;
+    header.append(heading, identifier);
+    if (path.parent_credential_id) {
+      const parent = document.createElement('a');
+      parent.href = '#chain-' + path.parent_credential_id;
+      parent.textContent = '上一步凭据 · ' + path.parent_credential_id.slice(0,12);
+      header.append(parent);
+    }
+    const flow = document.createElement('div');
+    flow.className = 'chain-flow';
+    const source = group('来源 · ' + chainEntries[path.source_entry], {
+      session: path.source_session, sent_at: path.sent_at, world_version: path.world_version
+    });
+    source.className = 'chain-source';
+    appendNetwork(source, path.network_evidence);
+    const evidence = document.createElement('a');
+    const params = new URLSearchParams({run:runs.value,session:path.source_session});
+    evidence.href = '/evidence?' + params;
+    evidence.textContent = '打开来源会话证据';
+    source.append(evidence);
+    const arrow = document.createElement('span');
+    arrow.className = 'chain-arrow';
+    arrow.setAttribute('aria-hidden','true');
+    arrow.textContent = '→';
+    const targets = document.createElement('div');
+    targets.className = 'chain-targets';
+    for (const use of uses) {
+      const target = group('命中 · ' + (chainEntries[use.entry] || use.entry), {
+        session: use.session, recorded_at: use.observed_at, evidence_use: use.use_id,
+        associated: use.associated ? '已关联' : '已撤销关联'
+      });
+      target.className = use.associated ? 'chain-target' : 'chain-target withdrawn';
+      appendNetwork(target, use.network_evidence);
+      target.append(responseLink(runs.value, use.associated ? 'detach' : 'restore', use.use_id,
+                                 use.associated ? '申请撤销关联' : '申请恢复关联'));
+      targets.append(target);
+    }
+    flow.append(source, arrow, targets);
+    section.append(header, flow);
+    root.append(section);
+  }
+  if (!root.childElementCount) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = '当前筛选下暂无已交付且被使用的标记。';
+    root.append(empty);
+  }
+}
+async function loadChains(selected) {
+  const data = await get('/api/evidence/runs/' + encodeURIComponent(selected) + '/chains');
+  if (runs.value !== selected) return;
+  chainRecords = data;
+  const confirmed = data.flatMap(path => path.uses).filter(use => use.associated);
+  document.querySelector('#chain-sources').textContent = data.length;
+  document.querySelector('#chain-uses').textContent = confirmed.length;
+  document.querySelector('#chain-entries').textContent = new Set(confirmed.map(use => use.entry)).size;
+  document.querySelector('#chain-receipts-link').href = '/canary?' + new URLSearchParams({run:selected});
+  renderChains();
+}
+chainFilter.onchange = renderChains;
+chainActive.onchange = renderChains;
 sessions.onchange = renderTimeline;
 async function refresh() {
   try {
@@ -190,20 +380,65 @@ async function refresh() {
     generation.replaceChildren();
     releasePanel.replaceChildren();
     if (!selected) return;
+    if (document.body.dataset.view === 'chain') {
+      chainRecords = [];
+      document.querySelector('#chains').replaceChildren();
+      statusLine.textContent = '正在读取链路证据';
+      await loadChains(selected);
+      if (runs.value === selected) {
+        document.querySelector('#run-version').textContent = runs.selectedOptions[0]?.dataset.version || '—';
+        statusLine.textContent = '';
+      }
+      return;
+    }
     const evidence = await get('/api/evidence/runs/' + encodeURIComponent(selected));
     if (runs.value !== selected) return;
     statusLine.textContent = '';
+    document.querySelector('#run-version').textContent = runs.selectedOptions[0]?.dataset.version || '—';
+    document.querySelector('#metric-events').textContent = evidence.timeline.length;
+    const capture = evidence.capture;
+    document.querySelector('#capture-status').textContent =
+      '本小时已采集 ' + capture.accepted + ' / ' + capture.limit +
+      ' 条 · 累计因限额未采集 ' + capture.dropped_total + ' 条';
+    document.querySelector('#metric-sessions').textContent = new Set(evidence.timeline.map(row => row.session)).size;
+    document.querySelector('#metric-decisions').textContent = evidence.generation.length;
+    document.querySelector('#metric-issued').textContent = evidence.credentials.length;
+    document.querySelector('#metric-receipts').textContent = evidence.credentials.filter(row => row.sent_at).length;
+    document.querySelector('#metric-hits').textContent = evidence.canary_uses.length;
+    document.querySelector('#metric-active').textContent = evidence.release.active ? '已激活' : '未激活';
+    document.querySelector('#metric-attempts').textContent = evidence.release.attempts.length;
+    document.querySelector('#metric-capabilities').textContent = evidence.release.manifest?.capabilities?.length ?? 0;
+    const receipts = document.querySelector('#receipts');
+    receipts.replaceChildren();
+    for (const row of evidence.credentials) {
+      const item = receipts.insertRow();
+      const deadline = new Date(row.expires_at * 1000).toISOString().replace('T',' ').slice(0,19);
+      const state = row.revoked_at ? '已撤销' : row.expires_at * 1000 <= Date.now() ? '已过期' : '有效';
+      for (const value of [row.credential_id, row.lure_id, row.source_session, 'v' + row.world_version,
+                           state, row.sent_at || '尚无回执', deadline]) item.insertCell().textContent = value;
+      const action = item.insertCell();
+      if (state === '有效') action.append(responseLink(selected, 'revoke', row.credential_id, '申请撤销'));
+      else action.textContent = '—';
+    }
+    if (!evidence.credentials.length) {
+      const item = receipts.insertRow();
+      item.dataset.placeholder = '';
+      const cell = item.insertCell();
+      cell.colSpan = 8;
+      cell.textContent = '暂无签发记录';
+    }
     renderRelease(selected, evidence.release);
     if (!evidence.registrations.length) registrations.textContent = '暂无登记';
     if (!evidence.canary_uses.length) canaries.textContent = '暂无跨入口命中';
     for (const row of evidence.registrations) {
       const item = document.createElement('article');
-      item.className = 'grid';
+      item.className = 'record grid';
       item.append(group('自报信息',row.self_reported),group('服务端观测',row.server_observed),
                   group('行为推断',row.inferred));
       registrations.append(item);
     }
-    const previousSession = sessions.value;
+    const previousSession = sessions.value || initialSession;
+    initialSession = '';
     sessions.replaceChildren(new Option('全部会话', ''));
     for (const session of new Set([...evidence.timeline, ...evidence.generation].map(row => row.session))) {
       sessions.add(new Option(session, session));
@@ -211,10 +446,18 @@ async function refresh() {
     if (Array.from(sessions.options).some(option => option.value === previousSession)) sessions.value = previousSession;
     selectedEvidence = evidence;
     renderTimeline();
+    if (location.hash.startsWith('#event-')) {
+      requestAnimationFrame(() => {
+        document.querySelector('#timeline-table').dispatchEvent(
+          new CustomEvent('reveal-row', {detail:location.hash.slice(1)}));
+        document.getElementById(location.hash.slice(1))?.scrollIntoView({block:'center'});
+      });
+    }
     for (const row of evidence.canary_uses) {
       const {history,use_id,...fields} = row;
       const item = document.createElement('article');
-      item.append(group('凭据使用证据', {evidence_use:use_id,...fields}));
+      item.className = 'record';
+      item.append(group('凭据使用证据', {evidence_use:use_id,...fields, associated: fields.associated ? '已关联' : '已撤销关联'}));
       if (history.length) {
         const list = document.createElement('ul');
         for (const revision of history) {
@@ -230,22 +473,32 @@ async function refresh() {
     statusLine.textContent = error.message;
   }
 }
+const query = new URLSearchParams(location.search);
+let initialSession = query.get('session');
 async function start() {
   try {
     const rows = await get('/api/evidence/runs');
     for (const row of rows) {
-      const option = new Option(row.run_id + ' · DWS ' + row.world_version,row.run_id);
+      const label = row.title || (row.variant === 'agent_note' ? '带核验链接的知识库' : '普通知识库');
+      const option = new Option((row.active ? '当前发布 · ' : '') + label + ' · v' + row.world_version + ' · ' + row.run_id.slice(0, 8), row.run_id);
       option.dataset.origin = row.origin;
+      option.dataset.version = 'v' + row.world_version;
       runs.add(option);
     }
+    const preferred = query.get('run') || rows.find(row => row.active)?.run_id;
+    if (rows.some(row => row.run_id === preferred)) runs.value = preferred;
     if (!rows.length) statusLine.textContent = '暂无研究场景';
     await refresh();
   } catch (error) {
     statusLine.textContent = error.message;
   }
 }
-runs.onchange = refresh;
+runs.onchange = () => {
+  const params = new URLSearchParams({run:runs.value});
+  window.history.replaceState(null, '', location.pathname + '?' + params);
+  sessions.value = '';
+  refresh();
+};
 document.querySelector('#refresh').onclick = refresh;
 start();
 </script>
-</html>

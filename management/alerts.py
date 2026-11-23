@@ -1,19 +1,21 @@
 """Authenticated view of recent honeynet alerts."""
 
 from collections import Counter
-from html import escape
 from typing import Literal
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 
 from audit.alerts import read_alerts
+from management.layout import metric, page, table, table_tools
 
 Source = Literal["web", "ssh", "mysql", "llm"]
-SOURCES = {"web": "OA", "ssh": "SSH", "mysql": "MySQL", "llm": "模拟 AI"}
+Kind = Literal["connection", "login", "login_failed", "canary", "rate_limited", "session_ended"]
+SOURCES = {"web": "Web", "ssh": "SSH", "mysql": "MySQL", "llm": "模拟 AI"}
 KINDS = {
     "connection": "新连接", "login": "认证成功",
     "login_failed": "认证失败", "canary": "Canary 命中",
+    "rate_limited": "入口限速", "session_ended": "连接因超过预算而结束",
 }
 
 
@@ -25,37 +27,39 @@ def alerts_router(require_operator):
         return read_alerts(source)
 
     @router.get("/alerts", response_class=HTMLResponse)
-    def page(source: Source | None = None):
+    def show(source: Source | None = None, kind: Kind | Literal[""] | None = None):
+        kind = kind or None
         data = read_alerts(source)
-        rows = "".join(
-            f"<tr><td>{escape(item['recorded_at'])}</td>"
-            f"<td>{escape(SOURCES.get(item['source'], item['source']))}</td>"
-            f"<td>{escape(KINDS.get(item['kind'], item['kind']))}</td></tr>"
-            for item in data["alerts"]
-        )
         counts = Counter(item["kind"] for item in data["alerts"])
-        summary = "".join(
-            f"<div><dt>{label}</dt><dd>{counts[key]}</dd></div>"
-            for key, label in KINDS.items()
-        )
-        empty = "暂无匹配事件" if data["has_data_source"] else "尚未收到采集数据"
-        filters = "".join(f'<a href="/alerts?source={key}">{label}</a>' for key, label in SOURCES.items())
-        return f"""<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>蜜网告警</title>
-<style>
-body{{font:16px system-ui;background:#eef2f5;color:#17283f;max-width:66rem;margin:auto;padding:2rem}}
-nav{{display:flex;gap:1rem;flex-wrap:wrap;margin-block:1rem}}
-dl{{display:grid;grid-template-columns:repeat(auto-fit,minmax(8rem,1fr));gap:.75rem}}
-dl div{{background:white;padding:1rem;border-radius:.5rem}} dd{{margin:.25rem 0 0;font-size:1.5rem}}
-a{{color:#2258a6}} table{{width:100%;background:white;border-collapse:collapse}}
-td,th{{padding:.75rem;text-align:left;border-bottom:1px solid #dae2ea}}
-</style><main><nav><a href="/">运行总览</a><a href="/evidence">会话证据</a></nav>
-<h1>蜜网告警</h1><p>连接、认证和 Canary 命中来自实际交互。列表最多显示最近 100 条，连接记录可能包含健康探测，访客身份需另行复核。</p>
-<nav aria-label="入口筛选"><a href="/alerts">全部</a>{filters}
-<a href="/alerts{('?source=' + source) if source else ''}">刷新</a></nav>
-<dl aria-label="当前筛选下的最近记录">{summary if data["has_data_source"] else ""}</dl>
-<table><thead><tr><th>记录时间（UTC）</th><th>入口</th><th>事件</th></tr></thead>
-<tbody>{rows or '<tr><td colspan="3">' + empty + '</td></tr>'}</tbody></table></main></html>"""
+        cards = "".join(metric(label, counts[key] if data["has_data_source"] else None, "当前入口保留记录",
+                               "warm" if key in ("login_failed", "canary") else "")
+                        for key, label in KINDS.items())
+        events = [item for item in data["alerts"] if kind is None or item["kind"] == kind]
+        rows = table(("时间（UTC）", "入口", "事件"),
+                     ((r["recorded_at"], SOURCES.get(r["source"], r["source"]),
+                       KINDS.get(r["kind"], r["kind"])) for r in events),
+                     "暂无匹配告警" if data["has_data_source"] else "尚未收到采集数据")
+        links = []
+        for key, label in ((None, "全部入口"), *SOURCES.items()):
+            query = [f"source={key}"] if key else []
+            if kind:
+                query.append(f"kind={kind}")
+            url = "/alerts" + ("?" + "&amp;".join(query) if query else "")
+            current = ' aria-current="true"' if source == key else ""
+            links.append(f'<a href="{url}"{current}>{label}</a>')
+        selected = "".join(f'<option value="{key}" {"selected" if key == kind else ""}>{label}</option>'
+                           for key, label in KINDS.items())
+        source_field = f'<input type="hidden" name="source" value="{source}">' if source else ""
+        body = f"""<section class="metrics" aria-label="告警统计">{cards}</section>
+        <section class="panel"><div class="panel-header"><div><h2>最近告警</h2>
+        <p>每个入口保留最近 100 条视图记录。连接可能包含健康探测。</p></div>
+        <a href="/canary">查看凭据关联 →</a></div>
+        <div class="toolbar"><nav class="segments" aria-label="协议筛选">{"".join(links)}</nav>
+        <form action="/alerts" method="get" class="actions">{source_field}
+        <label>事件类型 <select name="kind"><option value="">全部事件</option>{selected}</select></label>
+        <button type="submit">筛选</button></form></div>
+        {table_tools("alert-rows", "搜索时间、入口或事件")}<div id="alert-rows">{rows}</div></section>"""
+        return page("/alerts", "蜜网告警", "按协议和事件筛选实际发生的连接、认证和 Canary 命中。", body,
+                    actions='<a href="/situations" class="button">查看态势建议</a> <a href="/evidence" class="button">查看会话证据</a>')
 
     return router

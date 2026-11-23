@@ -1,10 +1,15 @@
 """Resolve bounded declarations to local, preconfigured service capabilities."""
 
 import os
+import hashlib
+import json
+import secrets
 from dataclasses import asdict, dataclass
+from time import time
 
 from research import isolated_http, isolated_mysql
 from research.generation import validate_scene
+from research.grounding import materialize_scene
 
 
 @dataclass(frozen=True)
@@ -24,6 +29,8 @@ CAPABILITIES = {
 }
 MAX_HTTP_ROUTES = 8
 MAX_NEW_PROCESSES = 1
+AUTO_CAPABILITIES = frozenset({"mysql_catalog", "isolated_http", "isolated_mysql"})
+PROBE_HEADER = "X-Honeynet-Release-Probe"
 
 
 class ReleasePreparationError(ValueError):
@@ -54,9 +61,25 @@ def isolated_runtime(plan):
     return isolated_http if plan.get("scene", {}).get("isolated_reason") == "standalone_http" else isolated_mysql
 
 
+def automatic_capabilities():
+    requested = set(os.environ.get("RESEARCH_AUTO_SERVICE_CAPABILITIES", "").split(",")) - {""}
+    if not requested <= AUTO_CAPABILITIES:
+        raise ValueError("Unsupported automatic service capability")
+    return requested
+
+
+def requests_for(scene):
+    selected = set(scene.get("capability_requests", []))
+    if "isolated_instance" in selected:
+        selected.remove("isolated_instance")
+        selected.add("isolated_http" if scene["isolated_reason"] == "standalone_http" else "isolated_mysql")
+    return selected
+
+
 def prepare_release(plan, probe=None, *, approve_isolated=False):
     try:
-        scene = validate_scene(plan["scene"], plan["documents"])
+        scene = validate_scene(plan["scene"], plan["documents"], plan.get("entity_graph"),
+                               typed_facts=bool(plan.get("fact_schema")))
     except (KeyError, ValueError):
         raise ReleasePreparationError("invalid_scene", "Scene failed release validation") from None
     if len(scene.services) > MAX_HTTP_ROUTES:
@@ -80,7 +103,7 @@ def prepare_release(plan, probe=None, *, approve_isolated=False):
         if not scene.isolated_reason:
             raise ReleasePreparationError("missing_requirement", "An isolated runtime requires an explicit capability requirement")
         try:
-            isolated_runtime(plan).start(plan)
+            isolated_runtime(plan).start(dict(plan, scene=materialize_scene(scene.model_dump())))
         except isolated_mysql.RuntimeUnavailable as exc:
             raise ReleasePreparationError("runtime_unavailable", str(exc)) from None
         selected.append("isolated_http" if isolated_runtime(plan) is isolated_http else "isolated_instance")
@@ -107,6 +130,81 @@ def http_listener_ready(_plan):
             return reply.status_code == 200 and reply.json() == {"service": "honeynet-visitor"}
     except (httpx.HTTPError, OSError, ValueError):
         return False
+
+
+def scene_resource(scene, resource, method, manifest):
+    service = next((item for item in scene.get("services", ())
+                    if resource == "service/" + item["path"] and method == item["method"]), None)
+    if service and manifest is not None:
+        if not any(route["id"] == service["id"] and route["method"] == method
+                   and route["path"] == resource and route["node_id"] == service["node_id"]
+                   for route in manifest):
+            service = None
+    if service:
+        node_id = service["node_id"]
+    elif resource == "index":
+        node_id = scene["entry_node"]
+    elif resource.startswith("scene/"):
+        node_id = resource.removeprefix("scene/")
+    else:
+        node_id = None
+    return next((node for node in scene["nodes"] if node["id"] == node_id), None), service
+
+
+def preview(plan, manifest, resource, method):
+    from research.grounding import materialize_scene
+
+    scene = materialize_scene(plan["scene"])
+    root = f"/decoy/{plan['run_id']}/"
+    routes = [dict(route, path=route["path"].removeprefix(root)) for route in manifest["routes"]]
+    node, service = scene_resource(scene, resource, method, routes)
+    if node is None or resource.startswith("service/") and service is None:
+        return None
+    return dict(world_version=manifest.get("graph_world_version", manifest["world_version"]),
+                node=node["id"], service=service["id"] if service else None,
+                data=service["data"] if service else None)
+
+
+def verify_candidate(lab, plan, manifest):
+    """Compare actual dispatch against the compiled manifest before traffic switches."""
+    import httpx
+
+    from research.grounding import materialize_scene
+
+    scene = materialize_scene(plan["scene"])
+    version = manifest.get("graph_world_version", manifest["world_version"])
+    root = f"/decoy/{plan['run_id']}/"
+    cases = [("GET", "index", dict(world_version=version, node=scene["entry_node"], service=None, data=None))]
+    cases.extend((item["method"], "service/" + item["path"],
+                  dict(world_version=version, node=item["node_id"], service=item["id"], data=item["data"]))
+                 for item in scene["services"])
+    port = os.environ.get("HONEYNET_VISITOR_HEALTH_PORT")
+    # Legacy scenes do not have a separately versioned published graph. Verify
+    # their manifest locally, while new split deployments exercise the listener.
+    if not port or "graph_world_version" not in manifest:
+        if any(preview(plan, manifest, resource, method) != expected for method, resource, expected in cases):
+            raise ReleasePreparationError("route_unready", "Candidate route failed verification")
+        return
+
+    token = secrets.token_hex(32)
+    key = hashlib.sha256(token.encode()).hexdigest()
+    with lab.connect() as db:
+        db.execute("DELETE FROM release_probes WHERE expires<=?", (int(time()),))
+        db.execute("INSERT INTO release_probes VALUES (?,?,?,?)",
+                   (plan["run_id"], key, int(time()) + 30, json.dumps(manifest)))
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{int(port)}", timeout=2, trust_env=False) as client:
+            for method, resource, expected in cases:
+                response = client.request(method, root + resource, headers={PROBE_HEADER: token})
+                if response.status_code != 200 or response.json() != expected:
+                    raise ReleasePreparationError("route_unready", "Candidate route failed verification")
+    except (httpx.HTTPError, ValueError) as exc:
+        if isinstance(exc, ReleasePreparationError):
+            raise
+        raise ReleasePreparationError("route_unready", "Candidate route failed verification") from None
+    finally:
+        with lab.connect() as db:
+            db.execute("DELETE FROM release_probes WHERE run=? AND token_hash=?", (plan["run_id"], key))
 
 
 def unavailable(plan, manifest):

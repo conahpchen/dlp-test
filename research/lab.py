@@ -7,13 +7,15 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from time import time
+from time import monotonic, sleep, time
 
 from dws.ids import ulid_now
 from research.analysis import analyze
 
 VARIANTS = ('plain', 'agent_note')
 MAX_EVENTS = 1000
+CAPTURE_WINDOW = 3600
+_AUTO_CAPTURE = object()
 CANARY_LIFETIME_SECONDS = 24 * 60 * 60
 MYSQL_CANARY_PREFIX = 'canary_'
 MYSQL_CANARY_ID_LENGTH = 24
@@ -40,11 +42,18 @@ class ResearchLab:
             CREATE TABLE IF NOT EXISTS version_bindings (
                 id TEXT PRIMARY KEY, run TEXT NOT NULL, world_id TEXT NOT NULL,
                 world_version INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS binding_overlays (
+                id TEXT PRIMARY KEY, branch_version INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS binding_targets (
+                id TEXT PRIMARY KEY, entry TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS visitor_runs (
                 session TEXT PRIMARY KEY, run TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS release_manifests (
                 run TEXT PRIMARY KEY, payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS release_probes (
+                run TEXT, token_hash TEXT, expires INTEGER NOT NULL, payload TEXT NOT NULL,
+                PRIMARY KEY(run,token_hash));
             CREATE TABLE IF NOT EXISTS release_preparations (
                 id INTEGER PRIMARY KEY, run TEXT NOT NULL, status TEXT NOT NULL,
                 detail TEXT, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -74,12 +83,33 @@ class ResearchLab:
                 PRIMARY KEY(use_id,revision));
             CREATE TABLE IF NOT EXISTS lure_response_receipts (
                 token_hash TEXT PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS canary_handoffs (
+                id TEXT PRIMARY KEY, parent_id TEXT NOT NULL, parent_use INTEGER NOT NULL,
+                root_id TEXT NOT NULL, source_entry TEXT NOT NULL, target_entry TEXT NOT NULL,
+                depth INTEGER NOT NULL, token TEXT NOT NULL, ssh_nonce TEXT,
+                UNIQUE(parent_id,source_entry));
+            CREATE TABLE IF NOT EXISTS handoff_policies (
+                run TEXT PRIMARY KEY, route TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS handoff_routes (
+                root TEXT PRIMARY KEY, route TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS response_requests (
+                id INTEGER PRIMARY KEY, run TEXT NOT NULL, kind TEXT NOT NULL,
+                target TEXT NOT NULL, revision INTEGER, reason TEXT NOT NULL,
+                requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', reviewed_by TEXT,
+                reviewed_at INTEGER, review_reason TEXT);
+            CREATE UNIQUE INDEX IF NOT EXISTS pending_response_target
+                ON response_requests(kind,target) WHERE status='pending';
             CREATE TABLE IF NOT EXISTS exposures (
                 token TEXT PRIMARY KEY, run TEXT NOT NULL, session TEXT NOT NULL,
                 fact TEXT NOT NULL, delivered TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY, run TEXT NOT NULL, payload TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS events_run ON events(run);
+            CREATE INDEX IF NOT EXISTS events_run_session ON events(run,json_extract(payload,'$.session'));
+            CREATE TABLE IF NOT EXISTS event_capture (
+                run TEXT PRIMARY KEY, window INTEGER NOT NULL, accepted INTEGER NOT NULL,
+                dropped INTEGER NOT NULL, sequence INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS policies (
                 run TEXT NOT NULL, session TEXT NOT NULL, revision INTEGER NOT NULL,
                 observed INTEGER NOT NULL, payload TEXT NOT NULL,
@@ -87,6 +117,20 @@ class ResearchLab:
             CREATE TABLE IF NOT EXISTS decisions (
                 id INTEGER PRIMARY KEY, run TEXT NOT NULL, session TEXT NOT NULL,
                 payload TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS decisions_session ON decisions(run,session);
+            CREATE TABLE IF NOT EXISTS decision_budget (
+                run TEXT NOT NULL, scope TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL,
+                PRIMARY KEY(run,scope));
+            CREATE TABLE IF NOT EXISTS generated_releases (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, revision INTEGER NOT NULL,
+                world_id TEXT NOT NULL, base INTEGER NOT NULL, payload TEXT NOT NULL, expires INTEGER,
+                status TEXT NOT NULL, world_version INTEGER, error TEXT);
+            CREATE INDEX IF NOT EXISTS generated_release_subject
+                ON generated_releases(kind,subject,status);
+            CREATE INDEX IF NOT EXISTS generated_release_expiry
+                ON generated_releases(status,expires);
+            CREATE INDEX IF NOT EXISTS generated_release_world
+                ON generated_releases(world_version);
             ''')
             self._migrate_canaries(db)
         self.path.chmod(0o600)
@@ -175,14 +219,31 @@ class ResearchLab:
             plan['template'] = {key: template[key] for key in ('template_id', 'revision')}
         plan['origin'] = 'fixture'
         if model is not None:
+            from research.artifacts import enabled
             from research.generation import generate_scene
+            from research.grounding import project
 
             draft_goal = goal or '生成有业务关联的知识库与运维排查线索，观察访客探索及核验行为'
             if automatic:
-                draft_goal += '。仅使用内置 Web 页面和模拟 HTTP 响应，capability_requests 必须为空。'
-            scene, review = generate_scene(model, plan['documents'], draft_goal)
-            if automatic and scene.get('capability_requests'):
-                raise ValueError('Automatic scenes must use embedded HTTP capabilities')
+                from research.service_planner import automatic_capabilities, requests_for
+
+                allowed = automatic_capabilities() if enabled() else set()
+                choices = [name + ": " + rule for name, rule in {
+                    'mysql_catalog': 'use mysql_catalog',
+                    'isolated_http': 'use isolated_instance with standalone_http',
+                    'isolated_mysql': 'use isolated_instance with relational_sql or sql_transactions',
+                }.items() if name in allowed]
+                draft_goal += ("。按需要选用以下许可能力：" + "；".join(choices) if choices else
+                               '。仅使用内置 Web 页面和模拟 HTTP 响应，capability_requests 必须为空。')
+            if enabled():
+                plan['publication_required'] = True
+                plan['fact_schema'] = 1
+                plan['entity_graph'] = project(world, version, plan['documents'])
+            scene, review = generate_scene(model, plan['documents'], draft_goal, plan.get('entity_graph'))
+            if automatic:
+                if not requests_for(scene) <= allowed:
+                    raise ValueError('Scene requests a capability outside the automatic publication policy')
+                plan['automatic'] = True
             plan.update(origin='ai', scene=scene, generation=dict(model=model.name, review=review, goal=goal))
         with self.connect() as db:
             db.execute('INSERT INTO runs VALUES (?, ?)', (run_id, json.dumps(plan)))
@@ -190,7 +251,9 @@ class ResearchLab:
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
 
     def activate(self, run, *, approve_isolated=False, only_if_inactive=False):
-        from research.service_planner import ReleasePreparationError, prepare_release
+        from research.service_planner import (
+            ReleasePreparationError, automatic_capabilities, prepare_release, requests_for, verify_candidate,
+        )
 
         with self.connect() as db:
             plan = self._plan(db, run)
@@ -203,15 +266,25 @@ class ResearchLab:
             active_manifest = db.execute("SELECT payload FROM release_manifests WHERE run=?", (run,)).fetchone()
         if previous and previous[0] == run and active_manifest and json.loads(active_manifest[0])["new_processes"]:
             return dict(active_run=run, entry=f'/decoy/{run}/index')
+        if plan.get("automatic") and plan.get("publication_required"):
+            requested = requests_for(plan["scene"])
+            if not requested <= automatic_capabilities():
+                raise ValueError("Automatic service capability approval changed")
+            approve_isolated = bool(requested & {"isolated_http", "isolated_mysql"})
+        publication, version = (self._publish_scene(plan) if plan.get("publication_required") else (None, None))
+        runtime_plan = dict(plan, graph_world_version=version) if publication else plan
         try:
-            manifest = prepare_release(plan, approve_isolated=approve_isolated)
+            manifest = prepare_release(runtime_plan, approve_isolated=approve_isolated)
         except ReleasePreparationError as exc:
             with self.connect() as db:
                 db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'rejected',?)",
                            (run, exc.code))
             raise
 
+        if publication:
+            manifest.update(publication_id=publication, graph_world_version=version)
         try:
+            verify_candidate(self, plan, manifest)
             with self.connect() as db:
                 active = db.execute("SELECT value FROM settings WHERE key='active_run'").fetchone()
                 latest_revision = db.execute("SELECT COALESCE(MAX(id),0) FROM release_history").fetchone()[0]
@@ -228,11 +301,34 @@ class ResearchLab:
                     db.execute('INSERT INTO release_history(previous_run,next_run,action) VALUES (?,?,?)',
                                (previous[0] if previous else None, run, 'activate'))
                     db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)', ('active_run', run))
-        except Exception:
+        except Exception as exc:
             if manifest["new_processes"]:
                 self._retire_isolated(run)
+            if isinstance(exc, ReleasePreparationError):
+                with self.connect() as db:
+                    db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'rejected',?)",
+                               (run, exc.code))
             raise
         return dict(active_run=run, entry=f'/decoy/{run}/index')
+
+    def _publish_scene(self, plan):
+        from research.artifacts import release, stage
+
+        run = plan["run_id"]
+        with self.connect() as db:
+            publication = stage(db, "scene", run, plan["version"], plan, {"plan": plan})
+        deadline = monotonic() + 8
+        while True:
+            with self.connect() as db:
+                status, version, error = release(db, publication)
+                if status == "active":
+                    return publication, version
+                if status in ("rejected", "failed") or monotonic() >= deadline:
+                    db.execute("INSERT INTO release_preparations(run,status,detail) VALUES (?,'rejected',?)",
+                               (run, error or "dws_publication_unready"))
+                    break
+            sleep(.05)
+        raise ValueError("DWS graph publication is not ready")
 
     def _retire_isolated(self, run):
         from research.isolated_mysql import RuntimeUnavailable
@@ -355,6 +451,13 @@ class ResearchLab:
             row = db.execute('SELECT value FROM settings WHERE key=?', ('active_run',)).fetchone()
         return row[0] if row else None
 
+    def pending_automatic_run(self):
+        with self.connect() as db:
+            row = db.execute("SELECT r.id FROM runs r WHERE json_extract(r.plan,'$.automatic')=1 "
+                             "AND NOT EXISTS (SELECT 1 FROM release_history h WHERE h.next_run=r.id "
+                             "AND h.action='activate') ORDER BY r.rowid DESC LIMIT 1").fetchone()
+        return row[0] if row else None
+
     def active_for(self, session, *, preferred=None):
         """Bind each visitor to the first active run it encounters."""
         with self.connect() as db:
@@ -387,13 +490,25 @@ class ResearchLab:
             self._retire_isolated(active[0])
 
     def policy(self, run, session):
+        from research.artifacts import live_policy
+
         with self.connect() as db:
             row = db.execute('SELECT payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
-        return json.loads(row[0]) if row else {}
+            return live_policy(db, row)
 
     def observe(self, run, session, peer, agent, what):
+        from research.artifacts import live_policy
+        from research.model_input import scene_reference
+
         with self.connect() as db:
-            return self._record(db, self._plan(db, run), session, peer, agent, what)
+            plan = self._plan(db, run)
+            policy_row = db.execute('SELECT payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
+            policy = live_policy(db, policy_row)
+            what = dict(what, policy_revision=policy.get('revision', 0))
+            what['observed_scene'] = scene_reference(what, policy.get('scene') or plan.get('scene') or {})
+            if version := policy.get('dws_version') or self._graph_version(db, run):
+                plan['world_version'] = version
+            return self._record(db, plan, session, peer, agent, what)
 
     @staticmethod
     def _plan(db, run):
@@ -406,10 +521,82 @@ class ResearchLab:
         with self.connect() as db:
             return self._plan(db, run)
 
-    def _record(self, db, plan, session, peer, agent, what):
-        count = db.execute('SELECT COUNT(*) FROM events WHERE run=?', (plan['run_id'],)).fetchone()[0]
-        if count >= MAX_EVENTS:
-            raise OverflowError('Run event budget exhausted')
+    @staticmethod
+    def _graph_version(db, run):
+        row = db.execute("SELECT json_extract(payload,'$.graph_world_version') FROM release_manifests "
+                         "WHERE run=?", (run,)).fetchone()
+        return row[0] if row else None
+
+    def graph_version(self, run):
+        with self.connect() as db:
+            return self._graph_version(db, run)
+
+    def probe_release(self, run, resource, method, token):
+        from research.artifacts import scene_summary
+        from research.service_planner import preview
+
+        if not re.fullmatch(r"[0-9a-f]{64}", token):
+            return None
+        key = hashlib.sha256(token.encode()).hexdigest()
+        with self.connect() as db:
+            row = db.execute("SELECT payload FROM release_probes WHERE run=? AND token_hash=? AND expires>?",
+                             (run, key, int(time()))).fetchone()
+            if row is None:
+                return None
+            manifest = json.loads(row[0])
+            result = preview(self._plan(db, run), manifest, resource, method)
+        graph = scene_summary(run, manifest["graph_world_version"])
+        if result is None or graph is None:
+            return None
+        if not any(node["id"] == result["node"] and node["kind"] == "document" for node in graph["nodes"]):
+            return None
+        if result["service"]:
+            identifier = "http:" + result["service"]
+            if not any(node["id"] == identifier and node["kind"] == "http_route" and node["method"] == method
+                       and "service/" + node["path"] == resource for node in graph["nodes"]):
+                return None
+            if {"source": result["node"], "target": identifier, "kind": "serves"} not in graph["edges"]:
+                return None
+        return result
+
+    @staticmethod
+    def _capture_slot(db, run):
+        window = int(time()) // CAPTURE_WINDOW
+        row = db.execute('SELECT window,accepted,sequence FROM event_capture WHERE run=?', (run,)).fetchone()
+        if row is None:
+            # Keep legacy sequence numbers and import this window's original limit.
+            previous = db.execute('SELECT COUNT(*) FROM events WHERE run=?', (run,)).fetchone()[0]
+            db.execute('INSERT INTO event_capture VALUES (?,?,?,0,?)', (run, window, previous, previous))
+            accepted, sequence = previous, previous
+        else:
+            recorded_window, accepted, sequence = row
+            if window > recorded_window:
+                accepted = 0
+                db.execute('UPDATE event_capture SET window=?,accepted=0 WHERE run=?', (window, run))
+        if accepted >= MAX_EVENTS:
+            db.execute('UPDATE event_capture SET dropped=dropped+1 WHERE run=?', (run,))
+            return None
+        db.execute('UPDATE event_capture SET accepted=accepted+1,sequence=sequence+1 WHERE run=?', (run,))
+        return sequence
+
+    def capture_status(self, run):
+        with self.connect() as db:
+            row = db.execute('SELECT window,accepted,dropped FROM event_capture WHERE run=?', (run,)).fetchone()
+        window = int(time()) // CAPTURE_WINDOW
+        return dict(window_seconds=CAPTURE_WINDOW, limit=MAX_EVENTS,
+                    accepted=row[1] if row and row[0] >= window else 0, dropped_total=row[2] if row else 0)
+
+    def capture_available(self, run):
+        return self.capture_status(run)['accepted'] < MAX_EVENTS
+
+    def _record(self, db, plan, session, peer, agent, what, *, slot=_AUTO_CAPTURE):
+        from research.model_input import scene_reference
+
+        count = self._capture_slot(db, plan['run_id']) if slot is _AUTO_CAPTURE else slot
+        if count is None:
+            return None
+        what = dict(what)
+        what.setdefault('observed_scene', scene_reference(what, plan.get('scene') or {}))
         try:
             address = ipaddress.ip_address(peer)
             prefix = str(ipaddress.ip_network(f'{address}/{24 if address.version == 4 else 48}', strict=False))
@@ -478,27 +665,44 @@ class ResearchLab:
 
     def revise_canary_use(self, use_id, revision, associated, reason):
         with self.connect() as db:
-            use = self._canary_use(db, use_id)
-            if use['revision'] != revision:
-                raise ValueError('Evidence association changed')
-            if use['associated'] != associated:
-                db.execute('INSERT INTO canary_use_revisions VALUES (?,?,?,?,?)',
-                           (use_id, revision + 1, int(associated), reason, int(time())))
-            return self._canary_use(db, use_id)
+            return self._revise_canary_use(db, use_id, revision, associated, reason)
+
+    def _revise_canary_use(self, db, use_id, revision, associated, reason):
+        use = self._canary_use(db, use_id)
+        if use['revision'] != revision:
+            raise ValueError('Evidence association changed')
+        if use['associated'] != associated:
+            db.execute('INSERT INTO canary_use_revisions VALUES (?,?,?,?,?)',
+                       (use_id, revision + 1, int(associated), reason, int(time())))
+        return self._canary_use(db, use_id)
 
     def revoke_canary(self, credential_id):
         with self.connect() as db:
-            credential = self._canary(db, credential_id)
-            if credential is None:
-                raise KeyError(credential_id)
-            if credential['revoked_at'] is None:
-                credential['revoked_at'] = int(time())
-                db.execute('UPDATE canary_credentials SET revoked_at=? WHERE credential_id=?',
-                           (credential['revoked_at'], credential_id))
-            return dict(credential, status='revoked')
+            return self._revoke_canary(db, credential_id)
+
+    def _revoke_canary(self, db, credential_id):
+        credential = self._canary(db, credential_id)
+        if credential is None:
+            raise KeyError(credential_id)
+        if credential['revoked_at'] is None:
+            credential['revoked_at'] = int(time())
+            db.execute('UPDATE canary_credentials SET revoked_at=? WHERE credential_id=?',
+                       (credential['revoked_at'], credential_id))
+            db.execute(
+                "WITH RECURSIVE descendants(id) AS (SELECT id FROM canary_handoffs WHERE parent_id=? "
+                "UNION ALL SELECT h.id FROM canary_handoffs h JOIN descendants d ON h.parent_id=d.id) "
+                "UPDATE canary_credentials SET revoked_at=? WHERE revoked_at IS NULL AND credential_id IN descendants",
+                (credential_id, credential['revoked_at']),
+            )
+            from research.handoffs import remove_revoked_ssh_permits
+
+            remove_revoked_ssh_permits(db, credential['revoked_at'])
+        return dict(credential, status='revoked')
 
     def _issue_lure(self, db, plan, session, resource):
         run = plan['run_id']
+        if plan.get('publication_required'):
+            resource += f"@v{plan['world_version']}"
         row = db.execute('SELECT token FROM lure_tokens WHERE run=? AND session=? AND resource=?',
                          (run, session, resource)).fetchone()
         if row:
@@ -511,9 +715,13 @@ class ResearchLab:
         now = int(time())
         credential = self._canary(db, credential_id)
         if credential is None:
+            from research import handoffs
+
             db.execute('INSERT INTO canary_credentials VALUES (?,?,?,?,?,?,?,?,NULL)',
                        (credential_id, run, session, resource, plan['world_version'],
                         'http_beacon', 'source_web_session', now + CANARY_LIFETIME_SECONDS))
+            if handoffs.enabled():
+                handoffs._locked_route(db, credential_id, run, assign=True)
             return token
         return token if self._canary_status(credential, now) == 'active' else None
 
@@ -536,15 +744,19 @@ class ResearchLab:
         """Return the escrowed synthetic token only for a delivered, live credential."""
         with self.connect() as db:
             rows = db.execute(
-                "SELECT c.credential_id,c.revoked_at,c.expires_at,l.token "
+                "SELECT c.credential_id,c.revoked_at,c.expires_at,l.token,0 "
                 "FROM canary_credentials c JOIN lure_response_receipts s ON s.token_hash=c.credential_id "
                 "JOIN lure_tokens l ON l.run=c.deployment_id AND l.session=c.source_session AND l.resource=c.lure_id "
-                "WHERE c.credential_id GLOB ? LIMIT 2", (short_id + '*',)
+                "WHERE c.credential_id GLOB ? UNION ALL "
+                "SELECT c.credential_id,c.revoked_at,c.expires_at,h.token,1 "
+                "FROM canary_credentials c JOIN lure_response_receipts s ON s.token_hash=c.credential_id "
+                "JOIN canary_handoffs h ON h.id=c.credential_id AND h.target_entry='mysql' "
+                "WHERE c.credential_id GLOB ? LIMIT 2", (short_id + '*', short_id + '*')
             ).fetchall()
             if len(rows) == 1:
-                credential_id, revoked, expires, token = rows[0]
+                credential_id, revoked, expires, token, directed = rows[0]
                 if revoked is None and expires > int(time()):
-                    return credential_id, token
+                    return credential_id, token, bool(directed)
             return None
 
     def observe_lure_use(self, token, entry, session):
@@ -552,45 +764,58 @@ class ResearchLab:
 
     def observe_canary_proof(self, credential_id, entry, session):
         with self.connect() as db:
-            if self._canary_status(self._canary(db, credential_id), int(time())) != 'active':
+            credential = self._canary(db, credential_id)
+            if self._canary_status(credential, int(time())) != 'active' or credential['scope'] != 'source_web_session':
                 return False
             sent = db.execute('SELECT 1 FROM lure_response_receipts WHERE token_hash=?',
                               (credential_id,)).fetchone()
             if sent:
-                db.execute('INSERT OR IGNORE INTO lure_uses(token_hash,entry,session) VALUES (?,?,?)',
-                           (credential_id, entry, session))
+                self._store_canary_use(db, credential_id, entry, session)
                 return True
             return False
 
+    @staticmethod
+    def _store_canary_use(db, credential_id, entry, session):
+        db.execute('INSERT OR IGNORE INTO lure_uses(token_hash,entry,session) VALUES (?,?,?)',
+                   (credential_id, entry, session))
+
     def visit(self, run, resource, session, peer, agent, method='GET', *, require_receipt=False):
+        from research.artifacts import live_policy
+        from research.grounding import materialize_scene
+        from research.model_input import scene_reference
+        from research.service_planner import scene_resource
+
         with self.connect() as db:
             plan = self._plan(db, run)
+            graph_version = self._graph_version(db, run) if plan.get('publication_required') else None
+            if plan.get('publication_required') and graph_version is None:
+                return 404, dict(error='接口不存在')
             policy_row = db.execute('SELECT payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
-            policy = json.loads(policy_row[0]) if policy_row else {}
+            policy = live_policy(db, policy_row, refresh=True)
+            if graph_version is not None:
+                plan['world_version'] = policy.get('dws_version') or graph_version
             variant = policy.get('variant', plan['variant'])
             selected = policy.get('document_id')
             documents = sorted(plan['documents'], key=lambda d: d['id'] != selected)
             what = dict(kind='research.visit', resource='other', policy_revision=policy.get('revision', 0))
             root = f'/decoy/{run}'
             scene = policy.get('scene') or plan.get('scene')
-            service = next((s for s in (scene or {}).get('services', [])
-                            if resource == 'service/' + s['path'] and s['method'] == method), None)
-            if service and not policy.get('scene'):
+            if scene:
+                scene = materialize_scene(scene)
+            routes = None
+            if scene and not policy.get('scene') and resource.startswith('service/'):
                 compiled = db.execute('SELECT payload FROM release_manifests WHERE run=?', (run,)).fetchone()
                 if compiled:
-                    routes = json.loads(compiled[0])['routes']
-                    if not any(route['path'] == f'{root}/{resource}' and route['method'] == method
-                               and route['node_id'] == service['node_id'] for route in routes):
-                        service = None
-            if service:
-                resource = 'scene/' + service['node_id']
-            if scene and (resource == 'index'  or resource.startswith('scene/')):
-                node_id = scene['entry_node'] if resource == 'index' else resource.removeprefix('scene/')
-                node = next((n for n in scene['nodes'] if n['id'] == node_id), None)
+                    routes = [dict(route, path=route['path'].removeprefix(root + '/'))
+                              for route in json.loads(compiled[0])['routes']]
+            if scene:
+                node, service = scene_resource(scene, resource, method, routes)
                 if node:
+                    node_id = node['id']
                     variant = 'agent_note' if node.get('lure_instruction') else 'plain'
+                    slot = self._capture_slot(db, run)
                     token = (self._issue_lure(db, plan, session, 'scene/' + node_id)
-                             if variant == 'agent_note' else None)
+                             if variant == 'agent_note' and slot is not None else None)
                     source_ids = [source['fact_id'] for source in node.get('sources', [])]
                     primary_fact = next(iter(source_ids), '')
                     if primary_fact:
@@ -601,8 +826,10 @@ class ResearchLab:
                                 source_fact_ids=source_ids,
                                 origin='ai', variant=variant,
                                 token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
-                    event = self._record(db, plan, session, peer, agent, what)
-                    self._remember_exposure(db, token, run, session, primary_fact, event)
+                    what['observed_scene'] = scene_reference(what, scene)
+                    event = self._record(db, plan, session, peer, agent, what, slot=slot)
+                    if token:
+                        self._remember_exposure(db, token, run, session, primary_fact, event)
                     by_id = {n['id']: n for n in scene['nodes']}
                     rendered_body = compile_service_paths(node['body'], scene.get('services', []), root)
                     result = dict(title=node['title'], content=rendered_body,
@@ -623,12 +850,14 @@ class ResearchLab:
                                  documents=[dict(path=d['path'], href=f"{root}/documents/{d['id']}") for d in documents])
             doc = next((d for d in plan['documents'] if resource == f"documents/{d['id']}"), None)
             if doc and not scene:
+                slot = self._capture_slot(db, run)
                 token = (self._issue_lure(db, plan, session, f"documents/{doc['id']}")
-                         if variant == 'agent_note' else None)
+                         if variant == 'agent_note' and slot is not None else None)
                 what.update(kind='research.delivery', resource=f"documents/{doc['id']}", title=doc['path'], fact_id=doc['fact_id'],
                             variant=variant, token_hash=hashlib.sha256(token.encode()).hexdigest() if token else None)
-                event = self._record(db, plan, session, peer, agent, what)
-                self._remember_exposure(db, token, run, session, doc['fact_id'], event)
+                event = self._record(db, plan, session, peer, agent, what, slot=slot)
+                if token:
+                    self._remember_exposure(db, token, run, session, doc['fact_id'], event)
                 result = dict(path=doc['path'], content=doc['content'])
                 if token:
                     result['maintenance_note'] = (
@@ -638,13 +867,22 @@ class ResearchLab:
                     result['verification_link'] = f'{root}/beacon/{token}'
                 return 200, result
             if resource.startswith('beacon/'):
+                from research import handoffs
+
                 token = resource.removeprefix('beacon/')
+                credential_id = hashlib.sha256(token.encode()).hexdigest()
+                if handoffs.enabled() and handoffs.directed(db, credential_id):
+                    credential = self._canary(db, credential_id)
+                    if credential['deployment_id'] == run:
+                        valid, _ = handoffs.prove(self, db, credential_id, 'web', session)
+                        if valid:
+                            return 200, dict(received=True)
+                    return 404, dict(error='接口不存在')
                 row = db.execute('SELECT session,fact,delivered FROM exposures WHERE token=? AND run=?',
                                  (token, run)).fetchone()
                 delivery = db.execute("SELECT payload FROM events WHERE run=? AND json_extract(payload, '$.event_id')=?",
                                       (run, row[2])).fetchone() if row else None
                 delivered_variant = json.loads(delivery[0])['what']['variant'] if delivery else None
-                credential_id = hashlib.sha256(token.encode()).hexdigest()
                 status = self._canary_status(self._canary(db, credential_id), int(time()))
                 sent = db.execute('SELECT 1 FROM lure_response_receipts WHERE token_hash=?',
                                   (credential_id,)).fetchone()
@@ -654,8 +892,15 @@ class ResearchLab:
                         what['fact_id'] = row[1]
                     what.update(kind='research.beacon', delivery_event_id=row[2],
                                 token_hash=hashlib.sha256(token.encode()).hexdigest(), resource='beacon')
-                    self._record(db, plan, session, peer, agent, what)
-                    return 200, dict(received=True)
+                    hit = self._record(db, plan, session, peer, agent, what)
+                    result = dict(received=True)
+                    if not hit and sent:
+                        self._store_canary_use(db, credential_id, 'web', session)
+                    if hit and handoffs.enabled() and sent:
+                        _, child = handoffs.prove(self, db, credential_id, 'web', session, allow_root=True)
+                        if child:
+                            result['next_hop'] = child[1]
+                    return 200, result
                 what.update(kind='research.invalid_beacon', resource='beacon')
             else:
                 what['probe'] = next((p for p in sorted(PROBES) if p in resource.split('/')), None)
@@ -680,6 +925,7 @@ class ResearchLab:
         return dict(run_id=run, version=plan['version'], variant=plan['variant'],
                     origin=plan.get('origin', 'fixture'), generation=plan.get('generation'),
                     scene=plan.get('scene'), rule_hints=analyze(events),
+                    capture=self.capture_status(run),
                     model_assessments=[dict(session=d['session'], **d['decision']) for d in decisions
                                        if d.get('status') == 'applied'],
                     classification_source='model' if plan.get('origin') == 'ai' else 'fixture_rules',

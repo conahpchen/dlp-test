@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import shlex
+from collections import OrderedDict
 
 from dws.hlc import Clock, HLC
 from dws.ids import entity_uuid
@@ -33,15 +34,16 @@ class Engine:
         self.clock = Clock(world.meta["node"], world.meta["base_seconds"])
         self.metrics = {"events": 0, "fallbacks": 0, "cas_conflicts": 0}
         self.auth_fails: dict = {}           # attacker_id -> 累计认证失败次数（J1）
+        self.online_auth_fails = OrderedDict()
         self.biz_seq = 0                     # 业务层 timeline 事件序号（commit_external）
 
     # ------------------------------------------------------------ 主入口
 
-    def process(self, event: dict) -> dict:
+    def process(self, event: dict, *, observation: str | None = None) -> dict:
         self.metrics["events"] += 1
         hlc = self.clock.after(HLC.parse(event["ts_hlc"]))
         self.world.meta["now_hlc"] = str(hlc)
-        attacker = self.identity.observe(
+        attacker = observation or self.identity.observe(
             ip24=event["src"]["ip"],
             cred_hash=(event.get("who") or {}).get("cred_hash"))
         start_version = self.world.meta["world_version"]
@@ -60,7 +62,7 @@ class Engine:
             elif kind == "ssh.close":
                 inner = self._close(event, attacker, hlc)
             elif kind == "llm.chat":
-                inner, chat_payload = self._llm_chat(event, attacker, hlc)
+                inner, chat_payload = self._llm_chat(event, attacker, hlc, online=observation is not None)
             else:
                 raise GroundingMiss(f"未知事件类型: {kind}")
         except GroundingMiss as miss:
@@ -203,7 +205,7 @@ class Engine:
     # ------------------------------------------------------------ 业务层提交入口（v1.6）
 
     def commit_external(self, session_id, proposals, correlation_id=None,
-                        actor_id=None, kind="business") -> str:
+                        actor_id=None, kind="business", *, private=False) -> str:
         """业务/工具层的提交入口（协作平台、Tool Adapter 调用）：
         推进时钟 → timeline(kind=business) + 业务提案合并为一次 CAS 提交。"""
         hlc = self.clock.after(None)
@@ -211,7 +213,7 @@ class Engine:
         self.biz_seq += 1
         ev_ref = f"biz-{self.biz_seq:06d}"
         tl = ("timeline", {"event_id_ref": ev_ref, "object_ref": None, "kind": kind})
-        self._commit(session_id, [tl] + list(proposals), hlc, attacker_id=actor_id)
+        self._commit(session_id, [tl] + list(proposals), hlc, attacker_id=actor_id, private=private)
         return str(hlc)
 
     # ------------------------------------------------------------ LLM 入口（M1，契约 12 §11/§8）
@@ -246,20 +248,25 @@ class Engine:
                 return c
         return None
 
-    def _llm_chat(self, event, attacker, hlc):
+    def _llm_chat(self, event, attacker, hlc, *, online=False):
         """LLM chat：DWS 凭据鉴权 → 判定（verdict 缺省由 L1 现算）→ 按预算 grounded 生成。"""
         cred = (event.get("who") or {}).get("cred_hash")
         host_eid = entity_uuid("host", event["dst"]["host"])
         match = self._match_llm_credential(cred, event["session"])
+        failures = self.online_auth_fails if online else self.auth_fails
         if match is None:
-            self.auth_fails[attacker] = self.auth_fails.get(attacker, 0) + 1
+            failures[attacker] = failures.get(attacker, 0) + 1
+            if online:
+                failures.move_to_end(attacker)
+                if len(failures) > 4096:
+                    failures.popitem(last=False)
             self._commit(None, [self._timeline(event, "llm_auth_fail", f"host:{host_eid}")],
                          hlc, attacker_id=attacker)
             return ("auth_fail", [], "template"), None
 
         sess = self.world.open_session(event["session"], attacker, None, host_eid)
 
-        ctx = {"auth_failures": self.auth_fails.get(attacker, 0),
+        ctx = {"auth_failures": failures.get(attacker, 0),
                "valid_key": True,
                "target_class": event["what"].get("target_class", "general")}
         verdict = event.get("verdict")

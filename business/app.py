@@ -26,10 +26,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from audit.alerts import record as record_alert
+from audit.flow_evidence import observe_http
 
 from dws.ids import ulid_now
 from dws.world import CommitRejected, World
-from entries.gateway.session import bind_explicit, bind_model_list, credentials
+from entries.gateway.session import bind_explicit, bind_model_list, credentials, install_observation_cookie, observed_session
+from entries.ingress_limits import WINDOW, BurstBudget, configured_limit, socket_peer
 from generation.llm_templates import classify_message
 from judgment import L1RulesJudge
 from replay.engine import Engine
@@ -37,14 +39,34 @@ from replay.engine import Engine
 REPO = Path(__file__).resolve().parents[1]
 
 def _apply_publication():
+    from research.artifacts import apply_next as apply_generated, archive_expired, enabled
     from business.publications import apply_next
+    from business.graph_publications import apply_next as apply_graph
 
-    with _lock:
-        apply_next(get_engine(), _checkpoint)
+    def run(lane, action):
+        try:
+            with _lock:
+                action()
+        except Exception as exc:
+            logging.getLogger(__name__).warning("DWS %s lane failed (%s)", lane, type(exc).__name__)
+
+    run("document", lambda: apply_next(get_engine(), _checkpoint))
+    run("graph", lambda: apply_graph(get_engine(), _checkpoint))
+    if enabled():
+        from research.api import current_lab
+
+        run("archive", lambda: archive_expired(current_lab(), get_engine(), _checkpoint))
+        run("generated", lambda: apply_generated(current_lab(), get_engine(), _checkpoint))
 
 
 @asynccontextmanager
 async def _lifespan(_app):
+    _app.state.request_limits = {}
+    if os.environ.get("HONEYNET_VISITOR_ONLY") == "1":
+        _app.state.request_limits = {
+            "web": BurstBudget(configured_limit("HONEYNET_WEB_REQUESTS_PER_10S")),
+            "llm": BurstBudget(configured_limit("HONEYNET_LLM_REQUESTS_PER_10S")),
+        }
     if os.environ.get("HONEYNET_DWS_ATOMIC") != "1":
         yield
         return
@@ -71,6 +93,7 @@ async def _lifespan(_app):
 
 
 app = FastAPI(title="澄川研发服务平台", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
+install_observation_cookie(app)
 _lock = threading.RLock()  # 可重入：_audit 锁内调 get_engine（历史教训见 §13 运行约束）
 _engine: Engine | None = None
 _sessions: dict = {}  # token -> {username, identity_eid, role, cred_hash}
@@ -95,6 +118,23 @@ async def control_boundary(request: Request, call_next):
         supplied = request.headers.get("x-control-token", "")
         if not expected or not secrets.compare_digest(expected, supplied):
             return JSONResponse({"error": "接口不存在"}, status_code=404)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def ingress_budget(request: Request, call_next):
+    limits = getattr(request.app.state, "request_limits", {})
+    path = request.url.path
+    if limits and path not in ("/healthz", "/api/events", "/api/events/ingest"):
+        entry = "llm" if path.startswith("/v1/") else "web"
+        rejected, first = limits[entry].check(socket_peer(request.scope.get("client")))
+        if rejected:
+            if first:
+                await run_in_threadpool(record_alert, entry, "rate_limited")
+            headers = {"Retry-After": str(WINDOW), "Cache-Control": "no-store"}
+            if request.scope.get("http_version") in ("1.0", "1.1"):
+                headers["Connection"] = "close"
+            return JSONResponse({"error": "请求过于频繁"}, status_code=429, headers=headers)
     return await call_next(request)
 
 
@@ -157,11 +197,11 @@ def _audit(user: str, method: str, path: str, status: int) -> None:
         )
 
 
-def _checkpoint(engine):
+def _checkpoint(engine, *, archived=()):
     from business.storage import location, persist, restore
 
     try:
-        persist(engine, _audit_rows, _events)
+        persist(engine, _audit_rows, _events, archived=archived)
     except Exception:
         path = location()
         if path and path.suffix == ".sqlite":
@@ -258,14 +298,32 @@ async def login(request: Request):
             "cred_hash": cred_hash,
         }
     _audit(username, "POST", "/api/login", 200)
-    await run_in_threadpool(record_alert, "web", "login")
+    if not _mark_employee_web_request(request, username):
+        await run_in_threadpool(record_alert, "web", "login")
     return {"token": token, "username": username, "role": owner.payload["role"]}
+
+
+def _mark_employee_web_request(request: Request, username: str) -> bool:
+    path, method = request.url.path, request.method
+    if (method, path) not in {("POST", "/api/login"), ("GET", "/api/tickets")}:
+        return False
+    proof = request.headers.get("x-employee-proof", "")
+    if not proof:
+        return False
+    from agent_runtime.service_identity import verify_web_employee
+
+    employee = verify_web_employee(proof, request.headers.get("x-session", ""), method, path)
+    if employee == username:
+        request.state.employee_activity = employee
+        return True
+    return False
 
 
 def _require(request: Request):
     sess = _session_of(request)
     if sess is None:
         raise PermissionError("未认证")
+    _mark_employee_web_request(request, sess["username"])
     return sess
 
 
@@ -419,6 +477,31 @@ def health():
     return {"service": "honeynet-visitor"}
 
 
+@app.get("/decoy/{run_id}/world-graph")
+def world_graph(run_id: str, request: Request):
+    from business.graph_publications import list_graphs
+    from research.api import current_lab
+    from research.bindings import HEADER, resolve
+
+    lab = current_lab()
+    try:
+        plan = lab.plan(run_id)
+        binding = resolve(lab, request.headers[HEADER], entry="web") if HEADER in request.headers else {}
+        if binding and binding["run"] != run_id:
+            raise KeyError("Mismatched scenario")
+        with _lock:
+            world = get_engine().world
+            version = binding.get("world_version", plan["world_version"])
+            overlay = binding.get("branch_version")
+            if (plan["world_id"] != world.meta["world_id"] or version > world.meta["world_version"]
+                    or (overlay is not None and overlay not in world.private_versions)):
+                raise KeyError("Unavailable graph projection")
+            graphs = list_graphs(world, version, overlay)
+    except KeyError:
+        raise HTTPException(404, "接口不存在") from None
+    return JSONResponse({"graphs": graphs}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/v1/models")
 def v1_models(request: Request):
     engine = get_engine()
@@ -457,12 +540,26 @@ async def v1_chat(request: Request):
     cred_hash, session = credentials(request)
     with _lock:
         session = _explicit_fake_binding(engine, request, session, cred_hash)
+    observation = observed_session(request, "business", session)
+    await run_in_threadpool(observe_http, "llm", observation, request)
     authorization = request.headers.get("authorization", "")
     bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
     if re.fullmatch(r"[A-Za-z0-9_-]{32}", bearer):
         from research.api import current_lab
+        from research import handoffs
 
-        await run_in_threadpool(current_lab().observe_lure_use, bearer, "llm", session)
+        lab = current_lab()
+        if handoffs.enabled():
+            from starlette.background import BackgroundTask
+
+            accepted, child = await run_in_threadpool(
+                handoffs.accept, lab, hashlib.sha256(bearer.encode()).hexdigest(), "llm", observation
+            )
+            if accepted and child:
+                return JSONResponse({"error": {"code": "invalid_api_key"}, "next_hop": child[1]}, status_code=401,
+                                    headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+                                    background=BackgroundTask(handoffs.delivered, lab, child[0]))
+        await run_in_threadpool(lab.observe_lure_use, bearer, "llm", observation)
 
     model = body.get("model") or ""
     if model not in engine.llm_models(session):
@@ -514,20 +611,29 @@ async def v1_chat(request: Request):
         "world_id": engine.world.meta.get("world_id"),
         "correlation_id": None,
     }
-    ctx = {
-        "auth_failures": engine.auth_fails.get(
-            engine.identity.observe(ip24=client_ip, cred_hash=cred_hash), 0
-        ),
-        "valid_key": engine.check_llm_key(cred_hash, session),
-        "target_class": target_class,
-    }
-    event["verdict"] = engine.judge.judge_safe(event, ctx)
+    event["what"]["observation_id"] = observation
     with _lock:
-        resp = engine.process(event)
+        ctx = {
+            "auth_failures": engine.online_auth_fails.get(observation, 0),
+            "valid_key": engine.check_llm_key(cred_hash, session),
+            "target_class": target_class,
+        }
+        proof = request.headers.get("x-employee-proof", "")
+        employee = None
+        if proof and ctx["valid_key"]:
+            from agent_runtime.service_identity import verify_llm_employee
+
+            employee = verify_llm_employee(proof, request.headers.get("x-session", ""), body)
+            if employee:
+                event["who"]["user"] = employee
+                event["what"]["activity_source"] = "employee"
+        event["verdict"] = engine.judge.judge_safe(event, ctx)
+        resp = engine.process(event, observation=observation)
         _emit(event)
 
     authenticated = resp.get("status") != "auth_fail"
-    await run_in_threadpool(record_alert, "llm", "login" if authenticated else "login_failed")
+    if not employee or not authenticated:
+        await run_in_threadpool(record_alert, "llm", "login" if authenticated else "login_failed")
     if not authenticated:
         return JSONResponse(
             {
@@ -542,14 +648,14 @@ async def v1_chat(request: Request):
     chat = resp["chat"]
     from research.worker import automatic_enabled
 
-    if automatic_enabled():
+    if automatic_enabled() and not employee:
         from research.api import current_lab
         from research.protocol_decoys import available, observe
 
         lab = current_lab()
         try:
-            decoy = await run_in_threadpool(available, lab, "llm", session)
-            await run_in_threadpool(observe, lab, "llm", session, target_class)
+            decoy = await run_in_threadpool(available, lab, "llm", observation)
+            await run_in_threadpool(observe, lab, "llm", observation, target_class)
             if decoy:
                 chat = dict(chat, content=chat["content"] + "\n\n" + decoy["note"])
         except sqlite3.Error:
