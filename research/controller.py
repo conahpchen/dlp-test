@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from research import business_guide
 from research.generation import CLAIM_FORMAT, ScenePatch, drafting_sources, merge_scene_patch, prompt_json, review_scene
 from research.model_input import model_event
 
@@ -114,7 +115,7 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
             "SELECT 1 FROM generated_releases WHERE kind='adaptation' AND subject=? AND status='pending'",
             (f'{run}:{session}',),
         ).fetchone():
-            return dict(status='publishing')
+            return dict(status='publishing', waiting_on_release=True)
         count = db.execute("SELECT count(*) FROM events WHERE run=? AND json_extract(payload,'$.session')=?",
                            (run, session)).fetchone()[0]
         latest = db.execute(
@@ -126,21 +127,30 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
         previous = json.loads(latest[0])['observed'] if latest else 0
         if count - previous < interval:
             return dict(status='not_due')
-        if not _reserve_decision(db, run, session):
-            return dict(status='budget_exhausted')
         rows = db.execute("SELECT payload FROM events WHERE run=? AND json_extract(payload,'$.session')=? "
                           "ORDER BY id DESC LIMIT 30", (run, session)).fetchall()
         events = [json.loads(r[0]) for r in reversed(rows)]
+        projected = [model_event(event, plan) for event in events]
         old = db.execute('SELECT revision,payload FROM policies WHERE run=? AND session=?', (run, session)).fetchone()
         revision = old[0] if old else 0
         from research.artifacts import live_policy
 
         policy = live_policy(db, old[1:] if old else None)
+        prior_guide = policy.get('business_guide') or {}
+        trigger = (business_guide.trigger(projected[-(count - previous):])
+                   if retry_pending and plan.get('origin') == 'ai' else None)
+        activity = trigger['what']['activity'] if trigger else None
+        if activity and prior_guide and activity in {prior_guide['activity'], 'read_knowledge_base'}:
+            return dict(status='not_due')
+        if not _reserve_decision(db, run, session):
+            return dict(status='budget_exhausted')
         audit = dict(session=session, observed=count, evidence_window=[e['event_id'] for e in events],
                      model=model.name, role='honeynet_interaction', status='pending', previous_revision=revision, attempts=[])
+        if trigger:
+            audit['business_activity'] = activity
         cursor = db.execute('INSERT INTO decisions(run,session,payload) VALUES (?,?,?)', (run, session, json.dumps(audit)))
         attempt_id = cursor.lastrowid
-    snapshot = dict(documents=drafting_sources(plan['documents']), events=[model_event(event, plan) for event in events[-30:]],
+    snapshot = dict(documents=drafting_sources(plan['documents']), events=projected,
                     prior_revision=revision,
                     current_scene=policy.get('scene') or plan.get('scene'), mode=plan.get('origin', 'fixture'),
                     prior_goal=policy.get('engagement_goal'), initial_node_ids=[n['id'] for n in plan.get('scene', {}).get('nodes', [])])
@@ -153,13 +163,20 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                          "relationships to the supplied DWS entity IDs.\n" + CLAIM_FORMAT)
     messages = [dict(role='system', content=instructions), dict(role='user', content=prompt_json(snapshot))]
     decision, scene = None, None
+    guide_node, repair = None, None
     # One bounded repair for AI output, within the already reserved decision slot.
     for attempt in range(2 if plan.get('origin') == 'ai' else 1):
         try:
-            choice = model.choose(messages)
+            if trigger:
+                choice, guide_node = business_guide.decide(model, trigger, snapshot['current_scene'],
+                                                          plan.get('entity_graph'), plan['documents'],
+                                                          prior_guide.get('node_id'), repair)
+            else:
+                choice = model.choose(messages)
             decision, scene = _validate(choice, plan, snapshot)
             if scene:
-                audit['scene_review'] = review_scene(model, scene, plan['documents'], plan.get('entity_graph'))
+                sources = [] if guide_node else plan['documents']
+                audit['scene_review'] = review_scene(model, scene, sources, plan.get('entity_graph'), node_id=guide_node)
             audit.update(status='applied', decision=decision.model_dump())
             audit['attempts'].append(dict(attempt=attempt + 1, status='accepted'))
             break
@@ -169,10 +186,13 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                      'unknown_expected_node', 'requested_service_missing', 'unknown_response_node', 'response_node_required', 'Duplicate or invalid service route',
                      'Unknown service node', 'Invalid service data', 'Existing service route changed', 'Duplicate patch node', 'Duplicate or missing scene node',
                      'Dangling scene link', 'Unverifiable source quote', 'Generated external resource reference',
-                     'Unreachable scene node', 'Independent model review rejected scene'}
+                     'Unreachable scene node', 'Independent model review rejected scene',
+                     'Use structured DWS claims for infrastructure facts', 'Unknown DWS claim slot',
+                     'Scene graph edge or node degree limit exceeded'}
             code = str(exc) if type(exc) is ValueError and str(exc) in known else type(exc).__name__
             audit['attempts'].append(dict(attempt=attempt + 1, status='rejected', code=code))
             audit.update(status='rejected', error_type=type(exc).__name__, error_code=code)
+            repair = dict(code=code, instruction='Return only intent, title and body with a generic, locally scoped note.')
             feedback = dict(snapshot, repair_feedback=dict(code=code, instruction='Return a corrected decision using a small patch. All original nodes are retained; preserve their links.'))
             messages = [dict(role='system', content=instructions), dict(role='user', content=prompt_json(feedback))]
     with lab.connect() as db:
@@ -187,6 +207,8 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                            input_event_id=snapshot['events'][-1]['event_id'] if snapshot['events'] and snapshot['events'][-1]['what']['kind']=='research.input' else None,
                            response_node=decision.response_node, engagement_goal=decision.engagement_goal, expected_next_nodes=decision.expected_next_nodes,
                            scene=scene.model_dump() if scene else None)
+            if guide_node:
+                applied['business_guide'] = {'activity': activity, 'node_id': guide_node}
             if plan.get('publication_required') and scene:
                 from research.artifacts import ADAPTATION_TTL, stage
 

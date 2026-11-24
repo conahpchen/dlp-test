@@ -211,6 +211,8 @@ const resources = {
 };
 const decisionNames = {applied:'已应用到会话', rejected:'未通过校验', stale:'已过期', pending:'处理中',
   publishing:'等待 DWS 发布', budget_exhausted:'模型限额已用完，继续提供原有内容'};
+const businessActivities = {read_database_catalog:'查看数据库目录', read_asset_inventory:'查看资产列表',
+  read_ticket_list:'查看工单列表', read_knowledge_base:'查看知识库'};
 function renderTimeline() {
   if (!selectedEvidence) return;
   const filter = sessions.value;
@@ -239,6 +241,8 @@ function renderTimeline() {
     item.className = 'record';
     item.append(group(decisionNames[record.status] || record.status, {
       '会话': record.session, '推测意图': record.intent || '未记录',
+      ...(businessActivities[record.business_activity] ? {'触发行为': businessActivities[record.business_activity]} : {}),
+      ...(record.error_code ? {'未通过原因': record.error_code} : {}),
       '提议新增或更新页面': record.nodes.map(node => node.title + '（' + node.id + '）').join('、') || '无',
       '提议模拟接口': record.services.map(service => service.method + ' ' + service.path).join('、') || '无'
     }));

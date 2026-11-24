@@ -26,11 +26,14 @@ class Model:
         self.base = os.environ.get('RESEARCH_MODEL_BASE_URL', 'https://api.deepseek.com').rstrip('/')
         self.name = os.environ.get('RESEARCH_MODEL', 'deepseek-flash')
         self.key = os.environ.get('RESEARCH_MODEL_API_KEY', '')
+        self.read_timeout = int(os.environ.get('RESEARCH_MODEL_TIMEOUT_SECONDS', '15'))
         url = urlsplit(self.base)
         if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
             raise ValueError('RESEARCH_MODEL_BASE_URL must be an HTTPS API base URL without credentials/query')
         if not self.name or not self.key:
             raise ValueError('Set RESEARCH_MODEL and RESEARCH_MODEL_API_KEY securely')
+        if not 1 <= self.read_timeout <= 180:
+            raise ValueError('Set RESEARCH_MODEL_TIMEOUT_SECONDS between 1 and 180')
 
         account = hashlib.sha256(self.key.encode()).hexdigest()
         self.budget = budget if budget is not None else _budget(str(budget_path()), self.base, self.name, account)
@@ -49,7 +52,8 @@ class Model:
         return result
 
     def _send(self, payload):
-        with httpx.Client(timeout=15, transport=self.transport) as client:
+        timeout = httpx.Timeout(15, read=self.read_timeout)
+        with httpx.Client(timeout=timeout, transport=self.transport) as client:
             response = client.post(self.base + '/chat/completions',
                                    headers={'Authorization': 'Bearer ' + self.key},
                                    json=payload)

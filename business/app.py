@@ -50,13 +50,15 @@ def _apply_publication():
         except Exception as exc:
             logging.getLogger(__name__).warning("DWS %s lane failed (%s)", lane, type(exc).__name__)
 
-    run("document", lambda: apply_next(get_engine(), _checkpoint))
-    run("graph", lambda: apply_graph(get_engine(), _checkpoint))
-    if enabled():
+    unified = enabled()
+    if unified:
         from research.api import current_lab
 
-        run("archive", lambda: archive_expired(current_lab(), get_engine(), _checkpoint))
         run("generated", lambda: apply_generated(current_lab(), get_engine(), _checkpoint))
+    run("document", lambda: apply_next(get_engine(), _checkpoint))
+    run("graph", lambda: apply_graph(get_engine(), _checkpoint))
+    if unified:
+        run("archive", lambda: archive_expired(current_lab(), get_engine(), _checkpoint))
 
 
 @asynccontextmanager

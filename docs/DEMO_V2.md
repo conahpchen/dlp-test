@@ -95,7 +95,9 @@ deploy/run-v2-local.sh flow-import /path/to/default-vpc-flow-log.txt
 
 ## 自动生成与投放
 
-需要自动模式时，给 visitor 和 control 同时设置 `RESEARCH_AUTOMATIC_DECOYS=1`，并在 control 配置模型。没有激活场景时，control 在 DWS 就绪后自动生成、复核并激活初始 HTTP 场景。访客从预置 OA 开始。成功读取知识库、数据库目录、资产或工单时触发后台任务，模型根据本会话的近期事件判断意图并提出内容和模拟 HTTP 接口。校验通过后，访客会话可以在再次打开知识库时看到相关线索。日常流程无需手填模板、生成目标或逐次审批。Web 入口可在现有蜜网内生成页面、线索和模拟 HTTP 服务。
+需要自动模式时，给 visitor 和 control 同时设置 `RESEARCH_AUTOMATIC_DECOYS=1`，并在 control 配置模型。没有激活场景时，control 在 DWS 就绪后自动生成、复核并激活初始 HTTP 场景。访客从预置 OA 开始。成功读取知识库、数据库目录、资产或工单时，后台根据本会话的业务读取行为和少量相关 DWS 实体生成一份相关资料。服务端负责将资料接入场景，校验图后提交私有版本。回到同一会话的知识库可以打开已发布的线索。Dashboard 的「会话证据」可查看触发动作和处理结果，「服务与运行」显示待发布、重试中和失败数量。场景内的显式交互也可以生成模拟 HTTP 服务。
+
+控制面的模型响应读取默认限时 15 秒。若确认所用模型提供商响应较慢，可在 control 设置 `RESEARCH_MODEL_TIMEOUT_SECONDS`，范围为 1 至 180 秒。调整后重启控制进程。更长的读取时限会延长单次任务等待时间。
 
 同一开关也适用于 MySQL 和 Cowrie 的启动进程，以及 Cowrie 的 `cowrie-events` 采集进程。Cowrie 镜像需要用更新后的代码重新构建。控制进程使用同一份研究数据库，SSH 额外通过现有只读挂载的导出目录交付合成配置。模拟 AI API 由 visitor 提供。
 

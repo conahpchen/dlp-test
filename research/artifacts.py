@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 from time import time
 
@@ -133,6 +134,12 @@ def archive_expired(lab, engine, checkpoint):
         return
     now = int(time())
     world = engine.world
+    with lab.connect(write=False, timeout=1) as db:
+        if not db.execute(
+            "SELECT 1 FROM generated_releases WHERE (kind='adaptation' AND expires IS NULL) "
+            "OR (status='active' AND kind IN ('adaptation','protocol') AND expires<=?) LIMIT 1", (now,),
+        ).fetchone():
+            return
     with lab.connect() as db:
         db.execute("UPDATE generated_releases SET expires=? WHERE kind='adaptation' AND expires IS NULL",
                    (now + ADAPTATION_TTL,))
@@ -230,8 +237,7 @@ def scene_summary(run, version):
 def apply_next(lab, engine, checkpoint):
     from business import publication_retry as retry
 
-    with lab.connect() as db:
-        retry.init(db)
+    with lab.connect(write=False, timeout=1) as db:
         row = db.execute("SELECT g.id,g.kind,g.subject,g.revision,g.world_id,g.base,g.payload,g.expires "
                          "FROM generated_releases g LEFT JOIN publication_retry r "
                          "ON r.lane='generated' AND r.job=g.id WHERE g.status='pending' "
@@ -243,7 +249,10 @@ def apply_next(lab, engine, checkpoint):
     except Exception as exc:
         identifier, kind, _, _, _, _, raw, _ = row
         with lab.connect() as db:
-            if retry.failure(db, "generated", identifier):
+            terminal = retry.failure(db, "generated", identifier)
+            logging.getLogger(__name__).warning("DWS %s publication %s %s (%s)", kind, identifier[:12],
+                                                "failed" if terminal else "will retry", type(exc).__name__)
+            if terminal:
                 if kind == "adaptation":
                     try:
                         _install_adaptation(db, json.loads(raw), None)
