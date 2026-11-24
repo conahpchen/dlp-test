@@ -6,7 +6,13 @@ KINDS = {
     "research.input", "web.request", "research.visit", "research.delivery",
     "research.beacon", "research.invalid_beacon", "research.lead",
 }
-ROUTES = {"index", "interact", "beacon", "service/config", "/api/login", "/api/documents", "/api/databases", "/api/assets", "/api/tickets"}
+BUSINESS_READS = {
+    "/api/documents": "read_knowledge_base",
+    "/api/databases": "read_database_catalog",
+    "/api/assets": "read_asset_inventory",
+    "/api/tickets": "read_ticket_list",
+}
+ROUTES = {"index", "interact", "beacon", "service/config", "/api/login", *BUSINESS_READS}
 COMPONENTS = {"cache", "database"}
 INTENTS = {
     "部署回滚": "deployment_rollback",
@@ -75,6 +81,9 @@ def model_event(event, plan):
                     break
     if inputs.get("truncated") is True:
         projected["activity"] = "truncated"
+    elif (projected["activity"] == "unknown" and projected["kind"] == "web.request"
+          and projected["method"] == "GET" and what.get("status") == 200 and resource in BUSINESS_READS):
+        projected["activity"] = BUSINESS_READS[resource]
     elif (projected["activity"] == "unknown" and projected["kind"] == "research.input"
           and isinstance(observed, dict) and observed.get("resource", "").startswith("service/")):
         projected["activity"] = "service_access"

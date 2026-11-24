@@ -88,7 +88,13 @@ def status():
         listeners = list(threads.map(lambda args: _probe(*args), probes))
     lab = current_lab()
     active = lab.active()
+    with lab.connect(write=False) as db:
+        publications = dict(db.execute("SELECT status, count(*) FROM generated_releases GROUP BY status"))
+        retrying = db.execute("SELECT COUNT(*) FROM publication_retry r JOIN generated_releases g ON g.id=r.job "
+                              "WHERE r.lane='generated' AND g.status='pending'").fetchone()[0]
     return {"listeners": listeners, "active_run": active, "release": lab.release_status(active) if active else None,
+            "generated_publications": {"pending": publications.get("pending", 0), "retrying": retrying,
+                                       "failed": publications.get("failed", 0)},
             "employee_activity": recent_activity(os.environ.get("HONEYNET_EMPLOYEE_ACTIVITY_FILE")),
             "release_health": lab.compensate_unready(inspect_only=True) if active else None, "latency_windows": _latency_windows(), "world_changes": _changes(), "model_budget_today": usage_today()}
 
@@ -108,6 +114,7 @@ def operations_router(require_operator):
         tones = {"responding": "ok", "unreachable": "bad", "unexpected": "warn", "unconfigured": ""}
         listeners = snapshot["listeners"]
         budget = snapshot["model_budget_today"] or {}
+        publications = snapshot["generated_publications"]
         health = (snapshot["release_health"] or {}).get("status")
         release_names = {"healthy": "依赖健康", "unready": "依赖异常",
                          "not_applicable": "暂无发布清单"}
@@ -153,6 +160,7 @@ def operations_router(require_operator):
         {f'<div class="chart" aria-hidden="true">{chart}</div>' if chart else ""}{latency}</section>
         <section class="panel"><div class="panel-header"><div><h2>当前投放</h2>
         <p class="mono">{esc(snapshot["active_run"] or "暂无活跃运行")}</p></div><a href="/releases">发布记录 →</a></div>
+        <p>AI 生成待发布 {publications["pending"]} · 重试中 {publications["retrying"]} · 失败 {publications["failed"]}</p>
         {service_table}</section></div>
         <section class="panel"><div class="panel-header"><div><h2>员工 Agent 跨服务活动</h2>
         <p>记录按真实协议执行的日常任务及结果。</p></div></div>

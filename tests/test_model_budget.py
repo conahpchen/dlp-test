@@ -14,6 +14,37 @@ def provider_ok(value):
     })
 
 
+def test_slow_model_read_timeout_is_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODEL_API_KEY", "synthetic")
+    monkeypatch.setenv("RESEARCH_MODEL_TIMEOUT_SECONDS", "180")
+
+    def transport(request):
+        assert request.extensions["timeout"]["read"] == 180
+        assert request.extensions["timeout"]["connect"] == 15
+        return provider_ok('{"accepted": true}')
+
+    model = Model(httpx.MockTransport(transport), budget=ModelBudget(tmp_path / "budget.sqlite", daily_tokens=20000))
+    assert model.choose([]) == {"accepted": True}
+
+
+def test_new_session_activity_waits_for_an_existing_publication(tmp_path, monkeypatch):
+    from research import worker
+    from research.lab import ResearchLab
+
+    lab = ResearchLab(tmp_path / "research.sqlite")
+    now = [100]
+    monkeypatch.setattr(worker, "time", lambda: now[0])
+    states = iter([{"status": "publishing", "waiting_on_release": True}, {"status": "applied"}])
+    monkeypatch.setattr(worker, "adapt", lambda *args, **kwargs: next(states))
+    assert worker.enqueue(lab, "run", "session")
+    assert worker.process_one(lab, object())
+    assert worker.result_status(lab, "run", "session") == "pending"
+    assert not worker.process_one(lab, object())
+    now[0] += worker.PUBLISH_RETRY_SECONDS
+    assert worker.process_one(lab, object())
+    assert not worker.process_one(lab, object())
+
+
 def test_durable_token_reservations_and_exact_request_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("RESEARCH_MODEL_API_KEY", "synthetic")
     ledger = tmp_path / "budget.sqlite"
@@ -130,7 +161,14 @@ def test_automatic_decoys_generate_and_deliver_without_template(demo_seed, monke
     monkeypatch.setenv("RESEARCH_ADAPTIVE_ENABLED", "1")
     monkeypatch.delenv("HONEYNET_VISITOR_HEALTH_PORT", raising=False)
     engine = Engine(World(demo_seed))
-    model = SceneModel()
+    class BusinessModel(SceneModel):
+        def choose(self, messages):
+            if "short original Chinese operations note" in messages[0]["content"]:
+                self.calls.append(messages)
+                return dict(intent="knowledge review", title="文档维护检查", body="核对文档的维护职责，并记录仍需确认的业务说明。")
+            return super().choose(messages)
+
+    model = BusinessModel()
     monkeypatch.setattr(control_app, "checkpoint", lambda: (engine, {}))
     monkeypatch.setattr("research.model.Model", lambda: model)
 
@@ -157,7 +195,7 @@ def test_automatic_decoys_generate_and_deliver_without_template(demo_seed, monke
     assert len(model.calls) == 2
     assert process_one(lab, model)
     response = client.get("/api/documents")
-    expected_link = f"/decoy/{run}/scene/evidence"
+    expected_link = f"/decoy/{run}/scene/oa-guide"
     assert response.headers["link"] == f'<{expected_link}>; rel="related"'
     assert client.get(expected_link).status_code == 200
-    assert lab.report(run)["decisions"][0]["decision"]["intent"] == "exploring service context"
+    assert lab.report(run)["decisions"][0]["decision"]["intent"] == "knowledge review"

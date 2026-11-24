@@ -109,12 +109,13 @@ def process_one(lab, model):
 
     unified = enabled()
     now = int(time())
+    lease_until = now + max(90, getattr(model, "read_timeout", 15) + 30)
     with lab.connect() as db:
         row = db.execute(
             "UPDATE protocol_decoys SET leased_until=? WHERE key=("
             "SELECT key FROM protocol_decoys WHERE processed<revision AND expires>? "
             "AND leased_until<=? ORDER BY rowid LIMIT 1) RETURNING key,entry,history,revision,expires",
-            (now + 90, now, now),
+            (lease_until, now, now),
         ).fetchone()
         if not row:
             return False
@@ -182,11 +183,11 @@ def process_one(lab, model):
                 "UPDATE protocol_decoys SET processed=?,leased_until=0,payload=COALESCE(?,payload) "
                 "WHERE key=? AND revision=? AND expires>? AND leased_until=?",
                 (revision, json.dumps(proposal, ensure_ascii=False) if proposal and not unified else None,
-                 key, revision, int(time()), now + 90),
+                 key, revision, int(time()), lease_until),
             ).rowcount
             if not updated:
                 db.execute("UPDATE protocol_decoys SET leased_until=0 WHERE key=? AND leased_until=?",
-                           (key, now + 90))
+                           (key, lease_until))
             if updated and proposal and unified:
                 if entry == "ssh" and proposal["intent"] == "configuration":
                     proposal["configuration"] = _configuration()

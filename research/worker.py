@@ -12,6 +12,7 @@ from research.controller import adapt
 
 MAX_PENDING = 128
 LEASE_SECONDS = 240
+PUBLISH_RETRY_SECONDS = 2
 
 
 def automatic_enabled():
@@ -49,10 +50,16 @@ def process_one(lab, model):
         if row is None:
             return False
         run, session, revision = row
+        # A decision can make two generation and two review requests in a bounded repair.
+        lease_seconds = max(LEASE_SECONDS, 4 * (getattr(model, "read_timeout", 15) + 15) + 45)
         db.execute("UPDATE adaptation_jobs SET lease=?,leased_until=? WHERE run=? AND session=?",
-                   (lease, now + LEASE_SECONDS, run, session))
+                   (lease, now + lease_seconds, run, session))
     result = adapt(lab, run, session, model, interval=1, retry_pending=True)
     with lab.connect() as db:
+        if result.get("waiting_on_release"):
+            db.execute("UPDATE adaptation_jobs SET leased_until=? WHERE run=? AND session=? AND lease=?",
+                       (int(time()) + PUBLISH_RETRY_SECONDS, run, session, lease))
+            return True
         if result["status"] == "budget_exhausted" and db.execute(
             "SELECT 1 FROM adaptation_jobs WHERE run=? AND session=? AND lease=? AND revision=?",
             (run, session, lease, revision),
@@ -88,7 +95,10 @@ async def consume(lab_provider, stop):
         lab = lab_provider()
         model = Model()
         if automatic_enabled():
-            process_protocol(lab, model)
+            try:
+                process_protocol(lab, model)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Protocol generation failed (%s)", type(exc).__name__)
         process_one(lab, model)
 
     while not stop.is_set():

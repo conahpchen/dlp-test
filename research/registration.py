@@ -166,6 +166,7 @@ def evidence(lab, run):
         generation.append({
             "session": record["session"],
             "status": record["status"],
+            "business_activity": record.get("business_activity"),
             "intent": decision.get("intent"),
             "nodes": [{"id": node["id"], "title": node["title"]} for node in patch.get("nodes", [])],
             "services": [{"method": service["method"], "path": service["path"]}

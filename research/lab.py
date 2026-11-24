@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic, sleep, time
 
+from business import publication_retry
 from dws.ids import ulid_now
 from research.analysis import analyze
 
@@ -132,6 +133,7 @@ class ResearchLab:
             CREATE INDEX IF NOT EXISTS generated_release_world
                 ON generated_releases(world_version);
             ''')
+            publication_retry.init(db)
             self._migrate_canaries(db)
         self.path.chmod(0o600)
 
@@ -154,12 +156,12 @@ class ResearchLab:
                         'http_beacon', 'source_web_session', start + CANARY_LIFETIME_SECONDS))
 
     @contextmanager
-    def connect(self):
-        db = sqlite3.connect(self.path, timeout=10)
+    def connect(self, *, write=True, timeout=10):
+        db = sqlite3.connect(self.path, timeout=timeout)
         try:
             with db:
                 # Serialize count/check/write so concurrent requests cannot exceed limits.
-                db.execute('BEGIN IMMEDIATE')
+                db.execute('BEGIN IMMEDIATE' if write else 'BEGIN')
                 yield db
         finally:
             db.close()

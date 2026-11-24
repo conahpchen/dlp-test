@@ -10,6 +10,8 @@ from research.grounding import validate_claims, validate_data, validate_text
 
 MAX_SCENE_EDGES = 32
 MAX_SCENE_DEGREE = 8
+MAX_SCENE_NODES = 8
+MAX_SCENE_ANCHORS = 16
 
 
 class Strict(BaseModel):
@@ -41,10 +43,10 @@ class SimulatedService(Strict):
 class Scene(Strict):
     title: str = Field(min_length=1, max_length=120)
     entry_node: str
-    nodes: list[SceneNode] = Field(min_length=2, max_length=8)
+    nodes: list[SceneNode] = Field(min_length=2, max_length=MAX_SCENE_NODES)
     objective: str = Field(min_length=1, max_length=500)
     services: list[SimulatedService] = Field(default_factory=list, max_length=8)
-    entity_links: list[Anchor] = Field(default_factory=list, max_length=16)
+    entity_links: list[Anchor] = Field(default_factory=list, max_length=MAX_SCENE_ANCHORS)
     fact_claims: list[Claim] = Field(default_factory=list, max_length=16)
     capability_requests: list[Literal["mysql_catalog", "isolated_instance"]] = Field(
         default_factory=list, max_length=2
@@ -202,12 +204,19 @@ def prompt_json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def review_scene(model, scene, documents, entity_graph=None):
-    context = dict(candidate=materialize_scene(scene.model_dump()), sources=documents)
+def review_scene(model, scene, documents, entity_graph=None, *, node_id=None):
+    candidate = materialize_scene(scene.model_dump())
+    instruction = REVIEWER
+    if node_id is not None:
+        candidate = {"nodes": [node for node in candidate["nodes"] if node["id"] == node_id]}
+        instruction += (" Review only the changed document in this request. The unchanged navigation and services "
+                        "were already validated. Approve generic synthetic checklists that contain no new "
+                        "claims about infrastructure, past events or real accounts.")
+    context = dict(candidate=candidate, sources=documents)
     if entity_graph is not None:
         context["entity_graph"] = entity_graph
     review = Review.model_validate(model.choose([
-        dict(role='system', content=REVIEWER),
+        dict(role='system', content=instruction),
         dict(role='user', content=prompt_json(context))]))
     if not review.accepted or review.issues:
         raise ValueError('Independent model review rejected scene')

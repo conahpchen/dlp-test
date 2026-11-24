@@ -89,6 +89,90 @@ def committed_graph(checkpoint, version, kind):
     return fact
 
 
+@pytest.mark.parametrize("at_capacity", [False, True])
+def test_oa_read_creates_a_related_note_for_the_original_session(monkeypatch, tmp_path, at_capacity):
+    from research.generation import MAX_SCENE_NODES
+    from research.worker import process_one
+
+    checkpoint, _ = setup_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "1")
+    monkeypatch.setenv("RESEARCH_ADAPTIVE_ENABLED", "1")
+    lab = current_lab()
+    world = visitor.get_engine().world
+    run = lab.create(world, "plain", GroundedModel())["run_id"]
+    plan = lab.plan(run)
+    if at_capacity:
+        nodes = plan["scene"]["nodes"]
+        while len(nodes) < MAX_SCENE_NODES:
+            node = dict(id=f"page-{len(nodes)}", title="维护档案", body="供模拟演练查阅的维护档案。",
+                        links=[], sources=[], lure_instruction=None)
+            nodes[-1]["links"].append(node["id"])
+            nodes.append(node)
+        with lab.connect() as db:
+            db.execute("UPDATE runs SET plan=? WHERE id=?", (json.dumps(plan), run))
+
+    class GuideModel:
+        name = "deterministic-guide"
+        calls = 0
+
+        def choose(self, messages):
+            context = json.loads(messages[-1]["content"])
+            self.calls += 1
+            if "Independently review" in messages[0]["content"]:
+                assert len(context["candidate"]["nodes"]) == 1 and not context["sources"]
+                return {"accepted": True, "issues": []}
+            assert context["activity"] == "read_database_catalog"
+            assert context["resource"] == "/api/databases"
+            assert any(entity["kind"] == "database" for entity in context["entities"])
+            assert set(context) == {"activity", "resource", "entities"}
+            return {"intent": "目录核查", "title": "数据库目录复核单",
+                    "body": "先核对目录条目的归属角色，再确认维护安排和复核记录是否齐全。"}
+
+    env = dict(os.environ, HONEYNET_VISITOR_ONLY="1")
+    env.pop("RESEARCH_MODEL_API_KEY", None)
+    with listener("business.app:app", env, ingress_only=True) as client:
+        lab.activate(run)
+        credentials = client.post("/api/login", json={"username": "ops01", "password": "ops01-password"}).json()
+        auth = {"Authorization": "Bearer " + credentials["token"]}
+        assert client.get("/api/databases", headers=auth).status_code == 200
+        assert client.get("/api/people", headers=auth).status_code == 200
+        session = client.cookies.get("research_session")
+        model = GuideModel()
+        if at_capacity:
+            # Force a real SQLite writer conflict. The same visitor must retry and commit
+            # after the competing transaction rolls back.
+            with closing(sqlite3.connect(checkpoint)) as writer, writer:
+                writer.execute("BEGIN IMMEDIATE")
+                assert process_one(lab, model)
+
+                def retry_pending():
+                    with lab.connect(write=False) as db:
+                        return db.execute(
+                            "SELECT 1 FROM publication_retry WHERE lane='generated' AND failures>0"
+                        ).fetchone()
+
+                wait_for(retry_pending)
+        else:
+            assert process_one(lab, model)
+        policy = wait_for(lambda: lab.policy(run, session))
+        graph = committed_graph(checkpoint, policy["dws_version"], "adaptation")
+        guide = policy["business_guide"]
+        assert any(node["id"] == guide["node_id"] and node["title"] == "数据库目录复核单" for node in graph["nodes"])
+        assert len(policy["scene"]["nodes"]) == len(plan["scene"]["nodes"]) + int(not at_capacity)
+        assert policy["scene"]["services"] == plan["scene"]["services"]
+        related = client.get("/api/documents", headers=auth).headers["link"]
+        href = related.split(">", 1)[0][1:]
+        assert client.get(href).json()["title"] == "数据库目录复核单"
+        assert process_one(lab, model) and model.calls == 2
+        with httpx.Client(base_url=client.base_url, trust_env=False) as other:
+            fresh = other.post("/api/login", json={"username": "ops01", "password": "ops01-password"}).json()
+            assert "link" not in other.get("/api/documents", headers={"Authorization": "Bearer " + fresh["token"]}).headers
+            result = other.get(href)
+            assert result.status_code == (200 if at_capacity else 404)
+            if at_capacity:
+                assert result.json()["title"] == "维护档案"
+
+
 def test_model_authored_entities_and_services_gate_visibility_on_dws(monkeypatch, tmp_path):
     checkpoint, projection = setup_environment(monkeypatch, tmp_path)
     with TestClient(visitor.app) as client:
@@ -188,7 +272,7 @@ def test_publication_lanes_continue_after_failure(monkeypatch):
     monkeypatch.setattr(artifacts, "archive_expired", lambda *args: completed.append("archive"))
     monkeypatch.setattr(artifacts, "apply_next", lambda *args: completed.append("generated"))
     visitor._apply_publication()
-    assert completed == ["graph", "archive", "generated"]
+    assert completed == ["generated", "graph", "archive"]
 
 
 def test_protocol_decoys_are_grounded_and_projected_after_commit(monkeypatch, tmp_path):
