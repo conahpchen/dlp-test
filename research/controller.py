@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from research import business_guide
 from research.generation import CLAIM_FORMAT, ScenePatch, drafting_sources, merge_scene_patch, prompt_json, review_scene
+from research.model import MODEL_FAILURES, failure_code
 from research.model_input import model_event
 
 DECISION_WINDOW = 3600
@@ -179,6 +180,11 @@ def adapt(lab, run, session, model, interval=3, *, retry_pending=False):
                 audit['scene_review'] = review_scene(model, scene, sources, plan.get('entity_graph'), node_id=guide_node)
             audit.update(status='applied', decision=decision.model_dump())
             audit['attempts'].append(dict(attempt=attempt + 1, status='accepted'))
+            break
+        except MODEL_FAILURES as exc:
+            code = failure_code(exc)
+            audit['attempts'].append(dict(attempt=attempt + 1, status='rejected', code=code))
+            audit.update(status='rejected', error_type=type(exc).__name__, error_code=code)
             break
         except Exception as exc:
             # Report only validator-owned messages; provider/Pydantic input dumps are excluded.

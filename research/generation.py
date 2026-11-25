@@ -5,9 +5,9 @@ from collections import Counter
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from research.grounding import Anchor, Claim, DisconnectedDWSAnchors, anchor_relationships, materialize_scene
+from research.grounding import Anchor, Claim, DisconnectedDWSAnchors, SLOT, anchor_relationships, materialize_scene
 from research.grounding import validate as validate_anchors
-from research.grounding import validate_claims, validate_data, validate_text
+from research.grounding import scene_context, validate_claims, validate_data, validate_text
 
 MAX_SCENE_EDGES = 32
 MAX_SCENE_DEGREE = 8
@@ -197,26 +197,63 @@ def validate_scene(candidate, documents, entity_graph=None, *, typed_facts=True)
 
 
 def drafting_sources(documents):
-    """Bound excerpts for drafting. The local validator and reviewer use full sources."""
-    return [dict(document, content=document["content"][:1600]) for document in documents]
+    """The local validator keeps access to the full sources."""
+    return [dict(document, content=document["content"][:800]) for document in documents]
 
 
 def prompt_json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _choose(model, phase, messages):
+    choose = getattr(model, "choose_for_phase", None)
+    return choose(messages, phase) if choose else model.choose(messages)
+
+
+def _review_context(candidate, documents, graph):
+    quotes = {}
+    for node in candidate["nodes"]:
+        for item in node.get("sources", ()):
+            quotes.setdefault(item["fact_id"], set()).add(item["quote"])
+    sources = drafting_sources(documents)
+    for source, original in zip(sources, documents, strict=True):
+        omitted = sorted(quote for quote in quotes.get(source["fact_id"], ())
+                         if quote in original["content"] and quote not in source["content"])
+        if omitted:
+            source["verified_quotes"] = omitted
+    context = dict(candidate=candidate, sources=sources)
+    if graph is not None:
+        used = {item["entity_id"] for item in candidate.get("entity_links", ())}
+        referenced = {claim["entity_id"] for claim in candidate.get("fact_claims", ())}
+        related = [edge for edge in graph["relations"] if {edge["source"], edge["target"]} & referenced
+                   or {edge["source"], edge["target"]} <= used]
+        ids = used | referenced | {identifier for edge in related for identifier in (edge["source"], edge["target"])}
+        context["entity_graph"] = dict(entities=[item for item in graph["entities"] if item["id"] in ids],
+                                       relations=related)
+    return context
+
+
 def review_scene(model, scene, documents, entity_graph=None, *, node_id=None):
-    candidate = materialize_scene(scene.model_dump())
+    raw = scene.model_dump()
+    candidate = materialize_scene(raw)
     instruction = REVIEWER
     if node_id is not None:
-        candidate = {"nodes": [node for node in candidate["nodes"] if node["id"] == node_id]}
+        nodes = [node for node in raw["nodes"] if node["id"] == node_id]
+        claims = {claim for node in nodes for key in ("title", "body", "lure_instruction")
+                  for claim in SLOT.findall(node[key] or "")}
+        candidate = {
+            "nodes": [node for node in candidate["nodes"] if node["id"] == node_id],
+            "entity_links": [link for link in raw["entity_links"] if link["node_id"] == node_id],
+            "fact_claims": [claim for claim in raw["fact_claims"] if claim["id"] in claims],
+        }
         instruction += (" Review only the changed document in this request. The unchanged navigation and services "
                         "were already validated. Approve generic synthetic checklists that contain no new "
                         "claims about infrastructure, past events or real accounts.")
-    context = dict(candidate=candidate, sources=documents)
-    if entity_graph is not None:
-        context["entity_graph"] = entity_graph
-    review = Review.model_validate(model.choose([
+    return review_candidate(model, instruction, _review_context(candidate, documents, entity_graph))
+
+
+def review_candidate(model, instruction, context):
+    review = Review.model_validate(_choose(model, "review", [
         dict(role='system', content=instruction),
         dict(role='user', content=prompt_json(context))]))
     if not review.accepted or review.issues:
@@ -259,7 +296,9 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
     instruction = BUILDER
     context = dict(goal=goal, sources=drafting_sources(documents))
     relationships = []
+    full_graph = entity_graph
     if entity_graph is not None:
+        entity_graph = scene_context(entity_graph, goal)
         relationships = anchor_relationships(entity_graph)
         if not relationships:
             raise ValueError("DWS snapshot contains no usable anchor relationship")
@@ -270,15 +309,9 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                         "For page-to-entity links, use documents, reviews, or uses. Each page may omit links. "
                         "Do not invent entity identifiers or overwrite existing facts.")
         instruction += "\n" + CLAIM_FORMAT
-        instruction += (
-            "\nReturn exactly the fields in this JSON Schema. Do not add a top-level type or wrapper. "
-            "Identifiers for fact claims must be lowercase ASCII, like declared-host. "
-            "For a hosted_on claim, use the edge's source entity ID and its target label. "
-            "Use a generic title and main text. When giving a specific hosting, version or access value, it must "
-            "come from a [[dws:claim-id]] slot. For example, host data can be {\"host\": \"[[dws:declared-host]]\"}. "
-            "Refer to the database generically as 'the inventory store' or '目录库' in substantive prose.\n"
-            + prompt_json(Scene.model_json_schema())
-        )
+        instruction += ("\nUse the listed top-level scene fields only. Fact claim IDs use lowercase ASCII. "
+                        "Use the target label for hosted_on. In narration, write infrastructure values using "
+                        "their [[dws:claim-id]] slots. Keep each page focused on the stated goal.")
         context["entity_graph"] = entity_graph
         context["anchor_examples"] = relationships[:3]
     if require_verification:
@@ -286,14 +319,17 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                         "Ask only for a local HTTP verification. The server generates the link.")
     attempts = 2 if entity_graph is not None or require_verification else 1
     for attempt in range(attempts):
-        candidate = model.choose([dict(role='system', content=instruction),
-                                  dict(role='user', content=prompt_json(context))])
+        candidate = _choose(model, "draft", [dict(role='system', content=instruction),
+                                             dict(role='user', content=prompt_json(context))])
+        progress = getattr(model, "progress", None)
+        if progress:
+            progress("validating")
         try:
             scene = _validate_draft(candidate, documents, entity_graph, relationships)
+            if full_graph is not None:
+                validate_scene(scene.model_dump(), documents, full_graph)
             if require_verification and not any((node.lure_instruction or "").strip() for node in scene.nodes):
                 raise VerificationRequired('Missing verification instructions')
-            review = review_scene(model, scene, documents, entity_graph)
-            return scene.model_dump(), review
         except (ValidationError, ValueError) as exc:
             if attempt + 1 == attempts:
                 raise
@@ -308,9 +344,6 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                     "Use the exact relation target label, not its ID. Source entity and field must match the baseline.",
                 "Missing verification instructions":
                     "Add a nonempty lure_instruction for an in-service HTTP verification on a reachable page.",
-                "Independent model review rejected scene":
-                    "Use generic synthetic business content and local HTTP verification. Leave credentials, "
-                    "URLs and access instructions to the application.",
             }.get(str(exc), "")
             repair_instruction = "Correct the draft. Use the exact field definitions. For an embedded route use services. "
             if entity_graph is not None:
@@ -325,6 +358,11 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                 context["validation_feedback"]["required_anchor_pair"] = pair
                 context["validation_feedback"]["instruction"] += (
                     " Anchor both entity IDs in required_anchor_pair using links from existing scene pages.")
+        else:
+            break
+    review = review_scene(model, scene, documents, entity_graph)
+    return scene.model_dump(), review
+
 
 
 class ScenePatch(Strict):

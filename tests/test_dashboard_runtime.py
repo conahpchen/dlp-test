@@ -64,6 +64,7 @@ def test_operator_generates_reviewable_scene_from_saved_template(monkeypatch, tm
     import json
     import time
 
+    from business.enterprise import enrich_seed
     from dws.world import World
     from replay.engine import Engine
     from research import control_app, template_scenes
@@ -73,20 +74,24 @@ def test_operator_generates_reviewable_scene_from_saved_template(monkeypatch, tm
     monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
     monkeypatch.setenv("HONEYNET_DASHBOARD_PASSWORD", "synthetic-test")
     monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "0")
-    monkeypatch.setenv("RESEARCH_UNIFIED_PUBLICATION", "0")
-    monkeypatch.setattr(control_app, "checkpoint", lambda: (Engine(World(demo_seed)), {}))
+    monkeypatch.setenv("RESEARCH_UNIFIED_PUBLICATION", "1")
+    monkeypatch.setattr(control_app, "checkpoint", lambda: (Engine(World(enrich_seed(demo_seed))), {}))
 
-    class ModelMissingFirstVerification(SceneModel):
+    class ModelAuthorsOnlyBusinessContent(SceneModel):
         def choose(self, messages):
             result = super().choose(messages)
             if len(self.calls) == 1:
+                result["type"] = "json_object"
+                result["nodes"][0]["body"] = "巡检对象为 [[dws:a-label]]。"
                 result["nodes"][1]["lure_instruction"] = None
             if len(self.calls) == 2:
                 context = json.loads(messages[-1]["content"])
-                assert "lure_instruction" in context["validation_feedback"]["instruction"]
+                assert "entity_graph" not in context
+                assert len(context["sources"]) <= 2
+                assert any(page.get("lure_instruction") for page in context["pages"])
             return result
 
-    model = ModelMissingFirstVerification()
+    model = ModelAuthorsOnlyBusinessContent()
     monkeypatch.setattr(template_scenes, "Model", lambda: model)
     dashboard = TestClient(management)
     operator = ("operator", "synthetic-test")
@@ -116,7 +121,17 @@ def test_operator_generates_reviewable_scene_from_saved_template(monkeypatch, tm
     plan = lab.plan(job["run_id"])
     assert plan["template"] == {"template_id": identifier, "revision": revision}
     assert any(node["lure_instruction"] for node in plan["scene"]["nodes"])
-    assert len(model.calls) == 3
+    assert len(model.calls) == 2
+    assert len(plan["scene"]["entity_links"]) == 2
+    draft = json.loads(model.calls[0][-1]["content"])
+    assert "use services" not in model.calls[0][0]["content"]
+    assert "entity_graph" not in draft and len(draft["relationship"]) == 3
+    assert all(len(source["content"]) <= 360 for source in draft["sources"])
+    claim, = plan["scene"]["fact_claims"]
+    assert claim["id"] == "a-label"
+    assert claim["value"] in {entity["label"] for entity in plan["entity_graph"]["entities"]}
+    assert draft["facts"]["[[dws:a-label]]"][1] == "label"
+    assert plan["scene"]["nodes"][0]["sources"][0]["fact_id"] in {doc["fact_id"] for doc in plan["documents"]}
     assert any(row["run_id"] == job["run_id"] and not row["active"]
                for row in dashboard.get("/api/evidence/runs", auth=operator).json())
 
@@ -152,7 +167,10 @@ def test_scene_generation_reports_safe_failure_and_allows_retry(monkeypatch, tmp
     queued = dashboard.post("/api/template-scenes", auth=operator, json=request).json()
     assert template_scenes.process_one(lab, lambda: World(demo_seed))
     response = dashboard.get(status_path, auth=operator)
-    assert response.json() == {"status": "failed", "run_id": None, "job_id": queued["job_id"], "error": code}
+    result = response.json()
+    assert result["status"] == "failed" and result["run_id"] is None
+    assert result["job_id"] == queued["job_id"] and result["error"] == code
+    assert result["stage"] == "preparing" and result["elapsed_seconds"] >= 0
     assert str(failure) not in response.text
     with lab.connect(write=False) as db:
         assert db.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
@@ -207,3 +225,67 @@ def test_alerts_show_actual_interactions_and_keep_credentials_out(monkeypatch, t
     assert "HTTP 响应分布" in overview.text and "认证失败" in overview.text
     assert 'href="/?days=30" aria-current="true"' in overview.text
     assert dashboard.get("/?days=31", auth=operator).status_code == 422
+
+
+@pytest.mark.parametrize(("cowrie_host", "include_required_assets", "expected_error", "calls"), [
+    ("web01", True, None, 2),
+    ("web01", False, "scene_scope_incomplete", 1),
+    ("missing-host", True, "world_scope_missing_ssh", 0),
+])
+def test_template_queue_preflights_cross_entry_grounding(
+    monkeypatch, tmp_path, demo_seed, cowrie_host, include_required_assets, expected_error, calls
+):
+    import json
+
+    from business.enterprise import enrich_seed
+    from dws.world import World
+    from research import artifacts, template_scenes
+    from research.api import current_lab
+    from tests.test_generative_research import SceneModel
+
+    monkeypatch.setenv("HONEYNET_DASHBOARD_PASSWORD", "synthetic-test")
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    monkeypatch.setenv("RESEARCH_UNIFIED_PUBLICATION", "1")
+    monkeypatch.setenv("HONEYNET_COWRIE_HOST", cowrie_host)
+    world = World(enrich_seed(demo_seed))
+
+    class CrossEntryModel(SceneModel):
+        def choose(self, messages):
+            result = super().choose(messages)
+            context = json.loads(messages[-1]["content"])
+            if len(self.calls) == 1:
+                assert {"ssh", "mysql"} == context["entry_assets"].keys()
+                assert {edge[1] for edge in context["relationships"]} == {"hosted_on", "l3-reachable"}
+                assert "entity_graph" not in context and "collab_core" not in context["facts"].values()
+                if include_required_assets:
+                    result["nodes"][0]["body"] = (
+                        "SSH 资料来自 " + context["entry_assets"]["ssh"] +
+                        "。模拟目录对应 " + context["entry_assets"]["mysql"] + "。"
+                    )
+            return result
+
+    model = CrossEntryModel()
+    monkeypatch.setattr(template_scenes, "Model", lambda: model)
+    dashboard = TestClient(management)
+    operator = ("operator", "synthetic-test")
+    template = dashboard.post("/api/templates", auth=operator, json={
+        "name": "跨入口目录核验", "variant": "plain",
+        "goal": "让 SSH 日志和 MySQL 目录引用同一个资产 collab_core。",
+    }).raise_for_status().json()
+    request = {key: template[key] for key in ("template_id", "revision")}
+    dashboard.post("/api/template-scenes", auth=operator, json=request).raise_for_status()
+    lab = current_lab()
+    assert template_scenes.process_one(lab, lambda: world)
+    status_path = f"/api/templates/{template['template_id']}/revisions/{template['revision']}/scene"
+    job = dashboard.get(status_path, auth=operator).raise_for_status().json()
+    assert job["error"] == expected_error
+    assert len(model.calls) == calls
+    if expected_error:
+        assert job["status"] == "failed" and job["run_id"] is None
+    else:
+        plan = lab.plan(job["run_id"])
+        assert len(plan["entity_graph"]["entities"]) == 3
+        graph = artifacts._scene_graph(world, plan, plan["scene"])
+        assert {edge["kind"] for edge in graph["edges"]} >= {"hosted_on", "l3-reachable"}
+        assert any("web01" in node.get("content", "") and "collab_core" in node.get("content", "")
+                   for node in graph["nodes"])
