@@ -53,9 +53,24 @@ function showGeneration(state) {
   generationState = state;
   const labels = {queued:'等待控制面处理…', running:'控制面正在生成并校验场景…', ready:'场景已生成，可以打开并审批。'};
   const errors = {model_unconfigured:'控制面尚未配置模型。', world_unavailable:'DWS 快照尚未就绪。',
-    model_unavailable:'模型暂不可用或达到调用预算。', verification_missing:'模型未生成可核验页面。'};
+    model_unavailable:'模型暂不可用或达到调用预算。',
+    model_timeout:'模型请求超时。可重试，或检查控制面的模型读取超时设置。',
+    model_connection:'控制面连接模型服务失败。请检查模型地址和网络。',
+    model_auth:'模型服务拒绝认证。请检查控制面的模型密钥和访问权限。',
+    model_rate_limit:'模型服务触发限流，请稍后重试。',
+    model_provider_error:'模型服务返回错误。请检查控制面的模型配置或稍后重试。',
+    model_response_invalid:'模型返回的内容不完整或无法解析。可重试。',
+    verification_missing:'模型未生成可核验页面。可在模板目标中明确要求页面包含本服务核验说明。',
+    scene_schema:'模型返回的场景结构无效。可简化模板目标后重试。',
+    scene_review_rejected:'候选场景未通过模型复核。可将模板收窄为合成业务资料，交由系统签发核验凭据。',
+    scene_dws_validation:'候选内容未通过 DWS 事实校验。可去掉具体主机、版本或账号密码要求，再生成。',
+    scene_dws_anchors:'候选场景未能关联 DWS 中一对已有关系的实体。可缩小场景主题后重试。',
+    world_no_relationships:'当前 DWS 快照没有可用于生成的实体关系，请先检查 DWS 数据。',
+    scene_navigation:'候选场景的页面链接或图规模未通过检查。可减少页面和链接后重试。',
+    scene_validation:'候选场景未通过内容校验。可调整模板目标后重试。',
+    scene_storage:'候选场景写入失败。请检查控制面的研究状态库是否可写。'};
   generationMessage.textContent = state?.status === 'failed'
-    ? `${errors[state.error] || '场景生成或校验失败。'} 可以重试。`
+    ? `${errors[state.error] || '场景生成失败。可以重试。'}${state.job_id ? ' 任务编号 ' + state.job_id : ''}`
     : labels[state?.status] || '';
   generated.hidden = !state?.run_id;
   if (state?.run_id) generated.href = '/releases?' + new URLSearchParams({run:state.run_id});

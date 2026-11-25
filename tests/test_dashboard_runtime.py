@@ -1,7 +1,10 @@
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from business import app as business
 from management.app import app as management
+from research.model import ModelProviderError, ModelResponseError
 
 
 def test_management_listener_displays_measured_public_requests(monkeypatch, tmp_path):
@@ -116,6 +119,50 @@ def test_operator_generates_reviewable_scene_from_saved_template(monkeypatch, tm
     assert len(model.calls) == 3
     assert any(row["run_id"] == job["run_id"] and not row["active"]
                for row in dashboard.get("/api/evidence/runs", auth=operator).json())
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    (httpx.ReadTimeout("provider details"), "model_timeout"),
+    (ModelProviderError(401), "model_auth"),
+    (ModelProviderError(429), "model_rate_limit"),
+    (ModelResponseError("malformed provider content"), "model_response_invalid"),
+    (ValueError("Use structured DWS claims for infrastructure facts"), "scene_dws_validation"),
+    (ValueError("Independent model review rejected scene"), "scene_review_rejected"),
+])
+def test_scene_generation_reports_safe_failure_and_allows_retry(monkeypatch, tmp_path, demo_seed, failure, code):
+    from dws.world import World
+    from research import template_scenes
+    from research.api import current_lab
+    from tests.test_generative_research import SceneModel
+
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    monkeypatch.setenv("RESEARCH_UNIFIED_PUBLICATION", "0")
+    monkeypatch.setenv("HONEYNET_DASHBOARD_PASSWORD", "synthetic-test")
+    dashboard = TestClient(management)
+    operator = ("operator", "synthetic-test")
+    request = {"template_id": "operations", "revision": 1}
+    status_path = "/api/templates/operations/revisions/1/scene"
+
+    class FailingModel(SceneModel):
+        def choose(self, messages):
+            raise failure
+
+    lab = current_lab()
+    monkeypatch.setattr(template_scenes, "Model", FailingModel)
+    queued = dashboard.post("/api/template-scenes", auth=operator, json=request).json()
+    assert template_scenes.process_one(lab, lambda: World(demo_seed))
+    response = dashboard.get(status_path, auth=operator)
+    assert response.json() == {"status": "failed", "run_id": None, "job_id": queued["job_id"], "error": code}
+    assert str(failure) not in response.text
+    with lab.connect(write=False) as db:
+        assert db.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+
+    monkeypatch.setattr(template_scenes, "Model", SceneModel)
+    retry = dashboard.post("/api/template-scenes", auth=operator, json=request).json()
+    assert retry["job_id"] != queued["job_id"]
+    assert template_scenes.process_one(lab, lambda: World(demo_seed))
+    ready = dashboard.get(status_path, auth=operator).json()
+    assert ready["status"] == "ready" and ready["run_id"] == retry["job_id"]
 
 
 def test_alerts_show_actual_interactions_and_keep_credentials_out(monkeypatch, tmp_path):

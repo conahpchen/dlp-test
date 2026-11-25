@@ -368,3 +368,61 @@ def test_drafting_bounds_sources_and_review_still_reads_full_documents(model):
     review = json.loads(model.calls[1][-1]["content"])
     assert len(draft["sources"][0]["content"]) == 1600
     assert review["sources"] == documents
+
+
+@pytest.mark.parametrize("has_related_anchor", [True, False])
+def test_scene_repairs_disconnected_dws_anchors(model, monkeypatch, has_related_anchor):
+    from uuid import UUID
+
+    from research.generation import generate_scene
+
+    documents = [{"id": "0", "fact_id": "fact-0", "path": "/kb/report.md", "content": "报表归档说明。"}]
+    database, host, handbook, policy = [str(UUID(int=i)) for i in range(1, 5)]
+    pair = {"source": database, "target": host, "relation": "hosted_on"}
+    graph = {"relations": [pair], "entities": [
+        {"id": database, "label": "inventory", "kind": "database"},
+        {"id": host, "label": "inventory-host", "kind": "host"},
+        {"id": handbook, "label": "handbook", "kind": "knowledge"},
+        {"id": policy, "label": "policy", "kind": "knowledge"},
+    ]}
+    candidate = model.draft(documents)
+    candidate["entity_links"] = [dict(node_id="overview", relation="reviews", entity_id=entity)
+                                 for entity in (database if has_related_anchor else policy, handbook)]
+    with pytest.raises(ValueError, match="DWS anchors must include an existing relationship"):
+        validate_scene(candidate, documents, graph)
+
+    choose = model.choose
+    drafts = []
+
+    def respond(messages):
+        if 'honeynet builder AI' not in messages[0]['content']:
+            return choose(messages)
+        context = json.loads(messages[-1]["content"])
+        drafts.append(context)
+        assert context["anchor_examples"] == [pair]
+        if len(drafts) == 1:
+            return copy.deepcopy(candidate)
+        assert context["validation_feedback"]["required_anchor_pair"] == pair
+        revised = copy.deepcopy(candidate)
+        revised["entity_links"] = [dict(node_id="overview", relation="reviews", entity_id=pair[key])
+                                    for key in ("source", "target")]
+        return revised
+
+    monkeypatch.setattr(model, "choose", respond)
+    scene, review = generate_scene(model, documents, "生成目录巡检文档", graph, require_verification=True)
+    targets = {anchor.entity_id for anchor in validate_scene(scene, documents, graph).entity_links}
+    assert {database, host} <= targets
+    assert scene["nodes"] == candidate["nodes"] and review["accepted"]
+    assert len(model.calls) == 1
+    if has_related_anchor:
+        assert handbook in targets and len(drafts) == 1
+    else:
+        assert len(drafts) == 2
+
+
+def test_scene_with_no_dws_relationship_does_not_call_model(model):
+    from research.generation import generate_scene
+
+    with pytest.raises(ValueError, match="DWS snapshot contains no usable anchor relationship"):
+        generate_scene(model, [], "生成目录巡检文档", {"entities": [], "relations": []})
+    assert model.calls == []

@@ -5,7 +5,8 @@ from collections import Counter
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from research.grounding import Anchor, Claim, materialize_scene, validate as validate_anchors
+from research.grounding import Anchor, Claim, DisconnectedDWSAnchors, anchor_relationships, materialize_scene
+from research.grounding import validate as validate_anchors
 from research.grounding import validate_claims, validate_data, validate_text
 
 MAX_SCENE_EDGES = 32
@@ -227,14 +228,46 @@ class VerificationRequired(ValueError):
     pass
 
 
+def _validate_draft(candidate, documents, entity_graph, relationships):
+    try:
+        return validate_scene(candidate, documents, entity_graph)
+    except DisconnectedDWSAnchors:
+        scene = Scene.model_validate(candidate)
+        if len(scene.entity_links) < MAX_SCENE_ANCHORS:
+            targets = {anchor.entity_id for anchor in scene.entity_links}
+            for edge in relationships:
+                endpoints = {edge["source"], edge["target"]}
+                present, missing = endpoints & targets, endpoints - targets
+                if len(present) != 1:
+                    continue
+                related = next(iter(present))
+                neighbor = next(iter(missing))
+                for anchor in scene.entity_links:
+                    if anchor.entity_id != related:
+                        continue
+                    # Keep the model's anchors and content. Only attach a verified neighbor.
+                    added = Anchor(node_id=anchor.node_id, entity_id=neighbor, relation="reviews")
+                    updated = scene.model_copy(update={"entity_links": [*scene.entity_links, added]})
+                    try:
+                        return validate_scene(updated.model_dump(), documents, entity_graph)
+                    except ValueError:
+                        continue
+        raise
+
+
 def generate_scene(model, documents, goal, entity_graph=None, *, require_verification=False):
     instruction = BUILDER
     context = dict(goal=goal, sources=drafting_sources(documents))
+    relationships = []
     if entity_graph is not None:
+        relationships = anchor_relationships(entity_graph)
+        if not relationships:
+            raise ValueError("DWS snapshot contains no usable anchor relationship")
         instruction += (" Add entity_links: [{node_id, entity_id, relation}] from authored nodes to at least "
                         "two distinct existing entities in entity_graph, reusing its authoritative entities and "
-                        "relations. At least two chosen entities must share an existing relation in entity_graph. "
-                        "Relation must be documents, reviews, or uses. Each page may omit links. "
+                        "relations. Include both source and target IDs of at least one relationship in "
+                        "entity_graph.relations. The supplied anchor_examples show valid pairs. "
+                        "For page-to-entity links, use documents, reviews, or uses. Each page may omit links. "
                         "Do not invent entity identifiers or overwrite existing facts.")
         instruction += "\n" + CLAIM_FORMAT
         instruction += (
@@ -247,6 +280,7 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
             + prompt_json(Scene.model_json_schema())
         )
         context["entity_graph"] = entity_graph
+        context["anchor_examples"] = relationships[:3]
     if require_verification:
         instruction += ("\nInclude a nonempty lure_instruction on at least one reachable page. "
                         "Ask only for a local HTTP verification. The server generates the link.")
@@ -255,7 +289,7 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
         candidate = model.choose([dict(role='system', content=instruction),
                                   dict(role='user', content=prompt_json(context))])
         try:
-            scene = validate_scene(candidate, documents, entity_graph)
+            scene = _validate_draft(candidate, documents, entity_graph, relationships)
             if require_verification and not any((node.lure_instruction or "").strip() for node in scene.nodes):
                 raise VerificationRequired('Missing verification instructions')
             review = review_scene(model, scene, documents, entity_graph)
@@ -274,6 +308,9 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                     "Use the exact relation target label, not its ID. Source entity and field must match the baseline.",
                 "Missing verification instructions":
                     "Add a nonempty lure_instruction for an in-service HTTP verification on a reachable page.",
+                "Independent model review rejected scene":
+                    "Use generic synthetic business content and local HTTP verification. Leave credentials, "
+                    "URLs and access instructions to the application.",
             }.get(str(exc), "")
             repair_instruction = "Correct the draft. Use the exact field definitions. For an embedded route use services. "
             if entity_graph is not None:
@@ -282,6 +319,12 @@ def generate_scene(model, documents, goal, entity_graph=None, *, require_verific
                 "fields": fields,
                 "instruction": repair_instruction + hint,
             }
+            if isinstance(exc, DisconnectedDWSAnchors):
+                targets = {link.entity_id for link in Scene.model_validate(candidate).entity_links}
+                pair = max(relationships, key=lambda edge: len({edge["source"], edge["target"]} & targets))
+                context["validation_feedback"]["required_anchor_pair"] = pair
+                context["validation_feedback"]["instruction"] += (
+                    " Anchor both entity IDs in required_anchor_pair using links from existing scene pages.")
 
 
 class ScenePatch(Strict):

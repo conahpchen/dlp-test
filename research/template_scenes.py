@@ -3,22 +3,42 @@
 import asyncio
 import logging
 import secrets
+import sqlite3
 from time import time
 
+import httpx
+from pydantic import ValidationError
+
 from research.generation import VerificationRequired
-from research.model import Model
+from research.model import Model, ModelProviderError, ModelResponseError
 from research.model_budget import InferenceUnavailable
 
 
 MAX_PENDING = 32
 JOB_STATE = "SELECT id,status,error FROM template_scene_jobs WHERE template_id=? AND revision=?"
+SCENE_ERRORS = {
+    "Independent model review rejected scene": "scene_review_rejected",
+    "Use structured DWS claims for infrastructure facts": "scene_dws_validation",
+    "Use a matching DWS claim for infrastructure prose": "scene_dws_validation",
+    "Use a matching DWS claim for infrastructure fields": "scene_dws_validation",
+    "DWS claim contradicts the baseline": "scene_dws_validation",
+    "Unknown DWS claim slot": "scene_dws_validation",
+    "Unverifiable source quote": "scene_dws_validation",
+    "Invalid DWS entity anchors": "scene_dws_anchors",
+    "DWS anchors must include an existing relationship": "scene_dws_anchors",
+    "DWS snapshot contains no usable anchor relationship": "world_no_relationships",
+    "Dangling scene link": "scene_navigation",
+    "Unreachable scene node": "scene_navigation",
+    "Scene graph edge or node degree limit exceeded": "scene_navigation",
+}
 
 
 def _state(row):
     if row is None:
         return None
     identifier, status, error = row
-    return {"status": status, "run_id": identifier if status == "ready" else None, "error": error}
+    return {"status": status, "job_id": identifier, "run_id": identifier if status == "ready" else None,
+            "error": error}
 
 
 def status(lab, template_id, revision):
@@ -47,7 +67,7 @@ def _generate(lab, world_provider, scene_job, template_id, revision):
         return "model_unconfigured"
     try:
         world = world_provider()
-    except RuntimeError:
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
         return "world_unavailable"
     try:
         template = lab.template(template_id, revision)
@@ -56,8 +76,24 @@ def _generate(lab, world_provider, scene_job, template_id, revision):
                    require_verification=variant == "agent_note")
     except InferenceUnavailable:
         return "model_unavailable"
+    except httpx.TimeoutException:
+        return "model_timeout"
+    except httpx.RequestError:
+        return "model_connection"
+    except ModelProviderError as exc:
+        if exc.status_code in (401, 403):
+            return "model_auth"
+        return "model_rate_limit" if exc.status_code == 429 else "model_provider_error"
+    except ModelResponseError:
+        return "model_response_invalid"
     except VerificationRequired:
         return "verification_missing"
+    except ValidationError:
+        return "scene_schema"
+    except ValueError as exc:
+        return SCENE_ERRORS.get(str(exc), "scene_validation")
+    except sqlite3.Error:
+        return "scene_storage"
     except Exception as exc:
         logging.getLogger(__name__).warning("Template scene generation failed (%s)", type(exc).__name__)
         return "generation_failed"
@@ -78,6 +114,7 @@ def process_one(lab, world_provider):
                    (lease, now + 900, identifier))
     error = _generate(lab, world_provider, (identifier, lease), template_id, revision)
     if error:
+        logging.getLogger(__name__).warning("Template scene job %s failed (%s)", identifier, error)
         with lab.connect() as db:
             db.execute("UPDATE template_scene_jobs SET status='failed',error=?,lease=NULL,leased_until=NULL "
                        "WHERE id=? AND lease=?", (error, identifier, lease))
