@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from collections import OrderedDict
@@ -16,7 +17,9 @@ IN_FLIGHT = BoundedSemaphore(2)
 
 
 class InferenceUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, code='model_unavailable'):
+        self.code = code
+        super().__init__(message)
 
 
 def budget_path():
@@ -73,9 +76,12 @@ class ModelBudget:
             raise ValueError("A cost budget requires both model token rates")
         return cls(ledger, daily_tokens, daily_cost, input_rate, output_rate)
 
+    def _cost(self, input_tokens, output_tokens):
+        return (input_tokens * self.input_rate + output_tokens * self.output_rate + 999_999) // 1_000_000
+
     def reserve(self, input_tokens, output_tokens):
         reserved = input_tokens + output_tokens
-        priced = (input_tokens * self.input_rate + output_tokens * self.output_rate + 999_999) // 1_000_000
+        priced = self._cost(input_tokens, output_tokens)
         day = int(time()) // 86400
         self.ledger.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.ledger, timeout=2)) as db, db:
@@ -86,13 +92,34 @@ class ModelBudget:
             row = db.execute("SELECT tokens,microusd FROM daily_budget WHERE day=?", (day,)).fetchone()
             tokens, cost = row if row is not None else (0, 0)
             if tokens + reserved > self.daily_tokens:
-                raise InferenceUnavailable("Model daily token budget exhausted")
+                raise InferenceUnavailable("Model daily token budget exhausted", "model_budget_tokens")
             if self.daily_cost and cost + priced > self.daily_cost:
-                raise InferenceUnavailable("Model daily cost budget exhausted")
+                raise InferenceUnavailable("Model daily cost budget exhausted", "model_budget_cost")
             db.execute("INSERT OR REPLACE INTO daily_budget VALUES (?,?,?)",
                        (day, tokens + reserved, cost + priced))
 
-    def choose(self, payload, input_tokens, send):
+        return day, reserved, priced
+
+    def _reconcile(self, reservation, usage):
+        if not isinstance(usage, dict):
+            return
+        inputs, outputs = usage.get("prompt_tokens"), usage.get("completion_tokens")
+        if any(type(value) is not int or not 0 <= value <= 10**9 for value in (inputs, outputs)):
+            return
+        details = usage.get("completion_tokens_details")
+        reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        if type(reasoning) is int and not 0 <= reasoning <= outputs:
+            # An inconsistent report cannot safely release the reserved budget.
+            return
+        day, reserved, estimated = reservation
+        try:
+            with closing(sqlite3.connect(self.ledger, timeout=2)) as db, db:
+                db.execute("UPDATE daily_budget SET tokens=tokens+?,microusd=microusd+? WHERE day=?",
+                           (inputs + outputs - reserved, self._cost(inputs, outputs) - estimated, day))
+        except sqlite3.Error:
+            logging.getLogger(__name__).warning("Model budget reconciliation could not be recorded")
+
+    def choose(self, payload, input_tokens, send, *, counts_as_failure):
         key = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).digest()
         with self.lock:
             now = monotonic()
@@ -103,25 +130,27 @@ class ModelBudget:
             if cached:
                 del self.cache[key]
             if self.open_until > now or (self.open_until and self.in_flight):
-                raise InferenceUnavailable("Model circuit is cooling down")
+                raise InferenceUnavailable("Model circuit is cooling down", "model_circuit_open")
             if key in self.in_flight:
-                raise InferenceUnavailable("Identical model request already in flight")
+                raise InferenceUnavailable("Identical model request already in flight", "model_concurrency")
             if not IN_FLIGHT.acquire(blocking=False):
-                raise InferenceUnavailable("Model concurrency budget exhausted")
+                raise InferenceUnavailable("Model concurrency budget exhausted", "model_concurrency")
             generation = self.generation
             self.in_flight.add(key)
         try:
-            self.reserve(input_tokens, payload["max_tokens"])
+            reservation = self.reserve(input_tokens, payload["max_tokens"])
             try:
                 result = send()
-            except Exception:
+            except Exception as error:
+                self._reconcile(reservation, getattr(error, "usage", None))
                 with self.lock:
-                    if generation == self.generation:
+                    if generation == self.generation and counts_as_failure(error):
                         self.failures += 1
                         if self.failures >= self.failure_limit:
                             self.open_until = monotonic() + self.cooldown
                             self.generation += 1
                 raise
+            self._reconcile(reservation, result[1].get("usage"))
             with self.lock:
                 if generation == self.generation:
                     self.failures = 0

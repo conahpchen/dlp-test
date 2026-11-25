@@ -51,7 +51,7 @@ def process_one(lab, model):
             return False
         run, session, revision = row
         # A decision can make two generation and two review requests in a bounded repair.
-        lease_seconds = max(LEASE_SECONDS, 4 * (getattr(model, "read_timeout", 15) + 15) + 45)
+        lease_seconds = max(LEASE_SECONDS, 4 * getattr(model, "total_timeout", 45) + 45)
         db.execute("UPDATE adaptation_jobs SET lease=?,leased_until=? WHERE run=? AND session=?",
                    (lease, now + lease_seconds, run, session))
     result = adapt(lab, run, session, model, interval=1, retry_pending=True)
@@ -87,7 +87,7 @@ def result_status(lab, run, session):
 
 
 async def consume(lab_provider, stop):
-    from research.model import Model
+    from research.model import MODEL_FAILURES, Model, failure_code
 
     from research.protocol_decoys import process_one as process_protocol
 
@@ -97,6 +97,8 @@ async def consume(lab_provider, stop):
         if automatic_enabled():
             try:
                 process_protocol(lab, model)
+            except MODEL_FAILURES as exc:
+                logging.getLogger(__name__).warning("Protocol generation failed (%s)", failure_code(exc))
             except Exception as exc:
                 logging.getLogger(__name__).warning("Protocol generation failed (%s)", type(exc).__name__)
         process_one(lab, model)

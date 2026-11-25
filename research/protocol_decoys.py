@@ -109,7 +109,7 @@ def process_one(lab, model):
 
     unified = enabled()
     now = int(time())
-    lease_until = now + max(90, getattr(model, "read_timeout", 15) + 30)
+    lease_until = now + max(90, getattr(model, "total_timeout", 45) + 15)
     with lab.connect() as db:
         row = db.execute(
             "UPDATE protocol_decoys SET leased_until=? WHERE key=("

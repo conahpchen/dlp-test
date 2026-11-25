@@ -52,13 +52,24 @@ function updateGenerateButton() {
 function showGeneration(state) {
   generationState = state;
   const labels = {queued:'等待控制面处理…', running:'控制面正在生成并校验场景…', ready:'场景已生成，可以打开并审批。'};
+  const stages = {preparing:'正在准备 DWS 资料', draft_waiting:'正在等待模型返回草稿', draft_reasoning:'模型正在推理草稿', draft_receiving:'模型已开始返回草稿',
+    validating:'正在校验场景结构和 DWS 事实', review_waiting:'正在等待模型复核', review_reasoning:'模型正在推理复核', review_receiving:'模型已开始返回复核结果'};
   const errors = {model_unconfigured:'控制面尚未配置模型。', world_unavailable:'DWS 快照尚未就绪。',
-    model_unavailable:'模型暂不可用或达到调用预算。',
+    model_unavailable:'模型暂不可用。',
+    model_budget_tokens:'控制面今日 Token 预算不足，按 UTC 零点更新额度。',
+    model_budget_cost:'控制面今日费用预算不足，按 UTC 零点更新额度。',
+    model_circuit_open:'模型网关近期连续失败，控制面正在冷却，稍后再试。',
+    model_concurrency:'控制面模型调用已满，稍后再试。',
+    model_connect_timeout:'连接模型网关超时，请检查控制面到模型网关的网络。',
+    model_first_response_timeout:'已发送请求，但在限时内没有收到模型的有效响应。',
+    model_response_idle:'模型已开始响应，随后中断或长时间未返回新数据。',
+    model_deadline:'这次模型调用达到总时限，控制面已停止等待。',
     model_timeout:'模型请求超时。可重试，或检查控制面的模型读取超时设置。',
     model_connection:'控制面连接模型服务失败。请检查模型地址和网络。',
     model_auth:'模型服务拒绝认证。请检查控制面的模型密钥和访问权限。',
     model_rate_limit:'模型服务触发限流，请稍后重试。',
     model_provider_error:'模型服务返回错误。请检查控制面的模型配置或稍后重试。',
+    model_output_limit:'模型达到输出 Token 上限。请缩小生成范围，或检查思考模式与输出上限。',
     model_response_invalid:'模型返回的内容不完整或无法解析。可重试。',
     verification_missing:'模型未生成可核验页面。可在模板目标中明确要求页面包含本服务核验说明。',
     scene_schema:'模型返回的场景结构无效。可简化模板目标后重试。',
@@ -66,12 +77,24 @@ function showGeneration(state) {
     scene_dws_validation:'候选内容未通过 DWS 事实校验。可去掉具体主机、版本或账号密码要求，再生成。',
     scene_dws_anchors:'候选场景未能关联 DWS 中一对已有关系的实体。可缩小场景主题后重试。',
     world_no_relationships:'当前 DWS 快照没有可用于生成的实体关系，请先检查 DWS 数据。',
+    world_scope_unavailable:'跨入口模板需要启用 DWS 统一发布。',
+    world_scope_missing_ssh:'DWS 缺少与当前 Cowrie 入口对应的 SSH 主机。',
+    world_scope_missing_mysql:'DWS 缺少目标数据库与模拟 MySQL 主机的托管关系。',
+    world_scope_missing_source:'当前 DWS 快照缺少模板点名的知识库文档。',
+    world_scope_missing_web:'DWS 缺少可用于该场景的 Web 主机。',
+    world_scope_missing_llm:'DWS 缺少可用于该场景的模拟 AI API 主机。',
+    world_scope_disconnected:'DWS 中缺少能把模板指定的资产和入口连起来的关系。',
+    world_scope_limit:'模板需要的 DWS 资料超出了单次生成范围。可缩小模板目标。',
+    scene_context_budget:'本次生成或复核的输入超过上限。可缩小模板目标。',
+    scene_scope_incomplete:'候选正文或响应遗漏了模板所需的 DWS 资产。',
     scene_navigation:'候选场景的页面链接或图规模未通过检查。可减少页面和链接后重试。',
     scene_validation:'候选场景未通过内容校验。可调整模板目标后重试。',
     scene_storage:'候选场景写入失败。请检查控制面的研究状态库是否可写。'};
+  const stage = stages[state?.stage];
+  const elapsed = state?.elapsed_seconds == null ? '' : ` · ${state.status === 'queued' ? '已等待' : '已用'} ${state.elapsed_seconds} 秒`;
   generationMessage.textContent = state?.status === 'failed'
-    ? `${errors[state.error] || '场景生成失败。可以重试。'}${state.job_id ? ' 任务编号 ' + state.job_id : ''}`
-    : labels[state?.status] || '';
+    ? `${errors[state.error] || '场景生成失败。可以重试。'}${stage ? ' 停在「' + stage + '」。' : ''}${elapsed} · 任务编号 ${state.job_id}`
+    : state?.status === 'running' && stage ? stage + elapsed : (labels[state?.status] || '') + elapsed;
   generated.hidden = !state?.run_id;
   if (state?.run_id) generated.href = '/releases?' + new URLSearchParams({run:state.run_id});
   updateGenerateButton();

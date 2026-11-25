@@ -37,7 +37,7 @@ def release(db, identifier):
 def _scene_graph(world, plan, scene):
     from research.generation import scene_edges, validate_scene
 
-    current = project(world, plan["world_version"], plan["documents"])
+    current = project(world, plan["world_version"], plan["documents"], bounded=not plan.get("template_grounding"))
     checked = validate_scene(scene, plan["documents"], current, typed_facts=bool(plan.get("fact_schema")))
     rendered = materialize_scene(checked.model_dump())
     pages = {page["id"]: page for page in rendered["nodes"]}

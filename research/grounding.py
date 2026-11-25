@@ -17,7 +17,7 @@ class Claim(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,31}$")
     entity_id: str
-    field: Literal["label", "hosted_on", "supports", "engine", "service_version", "world_version", "access_scope"]
+    field: Literal["label", "hosted_on", "supports", "engine", "service_version", "world_version", "access_scope", "catalog_name"]
     protocol: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]{0,20}$")
     value: str = Field(min_length=1, max_length=160)
 
@@ -41,20 +41,22 @@ QUALIFIED_SLOT = re.compile(
 CRITICAL_FIELDS = {
     "host": {"hosted_on", "label"}, "hostname": {"hosted_on", "label"}, "hosted_on": {"hosted_on"},
     "server": {"hosted_on", "label"}, "db_host": {"hosted_on", "label"},
-    "application": {"supports", "label"}, "database": {"label"}, "engine": {"engine"},
+    "application": {"supports", "label"}, "database": {"label", "catalog_name"}, "engine": {"engine"},
     "version": {"service_version", "engine", "world_version"}, "service_version": {"service_version"},
     "world_version": {"world_version"}, "access_scope": {"access_scope"}, "scope": {"access_scope"},
     "port": set(), "ip": set(), "permissions": set(), "host_ip": set(), "endpoint": set(),
 }
 
 
-def project(world, version, documents=()):
+def project(world, version, documents=(), *, bounded=True):
     view = world.view(version)
     document_ids = {doc["fact_id"] for doc in documents}
-    hosts = sorted(view.all_current_cls("host"), key=lambda f: f.payload["hostname"])[:8]
+    hosts = sorted(view.all_current_cls("host"), key=lambda f: f.payload["hostname"])
     objects = [fact for fact in view.all_current_cls("object")
                if fact.payload["type"] in ("application", "database") and not fact.payload["data"].get("graph_retired")]
-    objects = sorted(objects, key=lambda f: (f.payload["type"], f.payload["object_key"]))[:10]
+    objects = sorted(objects, key=lambda f: (f.payload["type"], f.payload["object_key"]))
+    if bounded:
+        hosts, objects = hosts[:8], objects[:10]
     selected = [dict(id=f.entity_id, kind="host", label=f.payload["hostname"],
                      protocols=sorted({s["proto"] for s in f.payload["services"]})) for f in hosts]
     selected.extend(dict(id=f.entity_id, kind=f.payload["type"], label=f.payload["object_key"]) for f in objects)
@@ -71,8 +73,13 @@ def project(world, version, documents=()):
     for entity in selected:
         entity["world_version"] = str(version)
         entity["access_scope"] = "synthetic_only"
-        if engine := object_facts.get(entity["id"], {}).get("engine"):
+        details = object_facts.get(entity["id"], {})
+        if engine := details.get("engine"):
             entity["engine"] = engine
+        if not bounded and isinstance(details.get("name"), str):
+            entity["aliases"] = [details["name"]]
+            if entity["kind"] == "database" and details["name"]:
+                entity["catalog_name"] = details["name"]
     edges = [dict(source=f.payload["from_entity_id"], target=f.payload["to_entity_id"],
                   relation=f.payload["kind"]) for f in view.all_current_cls("relation")
              if f.payload["from_entity_id"] in ids and f.payload["to_entity_id"] in ids]
@@ -81,7 +88,10 @@ def project(world, version, documents=()):
         for key, relation in (("host", "hosted_on"), ("application", "supports")):
             if target := labels.get(fact.payload["data"].get(key)):
                 edges.append(dict(source=fact.entity_id, target=target, relation=relation))
-    return {"entities": selected, "relations": edges[:30]}
+    if not bounded:
+        edges = [dict(source=source, target=target, relation=kind) for source, target, kind in
+                 dict.fromkeys((edge["source"], edge["target"], edge["relation"]) for edge in edges)]
+    return {"entities": selected, "relations": edges[:30] if bounded else edges}
 
 
 RELATION_TARGETS = {
@@ -99,6 +109,40 @@ def anchor_relationships(graph):
     targets = {item["id"] for item in graph["entities"] if item["kind"] in RELATION_TARGETS["reviews"]}
     return [edge for edge in graph["relations"] if edge["source"] != edge["target"]
             and {edge["source"], edge["target"]} <= targets]
+
+
+SCENE_TOPICS = {
+    "database": ("数据库", "库目录", "sql", "mysql", "database"),
+    "application": ("应用", "系统", "接口", "api", "application"),
+    "host": ("主机", "节点", "运维", "ssh", "host", "server"),
+    "knowledge": ("文档", "手册", "知识库", "知识", "document", "handbook"),
+}
+
+
+def scene_context(graph, goal, limit=8):
+    """Rank authoritative relationships before choosing the entities to show the drafter."""
+    query = goal.casefold()
+    entities = {entity["id"]: entity for entity in graph["entities"]}
+    scores = {
+        identifier: 10 * (entity["label"].casefold() in query) + sum(
+            topic in query for topic in SCENE_TOPICS.get(entity["kind"], ())
+        ) for identifier, entity in entities.items()
+    }
+    relationships = sorted(anchor_relationships(graph),
+                           key=lambda row: -(scores[row["source"]] + scores[row["target"]]))
+    chosen, edges = set(), []
+    for row in relationships:
+        ends = {row["source"], row["target"]}
+        if len(chosen | ends) <= limit:
+            chosen.update(ends)
+            edges.append(row)
+        if len(edges) == 8:
+            break
+    if len(chosen) < limit:
+        other = sorted(entities.keys() - chosen, key=lambda identifier: (-scores[identifier], identifier))
+        chosen.update(other[:limit - len(chosen)])
+    return {"entities": [entity for identifier, entity in entities.items() if identifier in chosen],
+            "relations": edges}
 
 
 def validate(anchors, node_ids, graph, *, minimum):

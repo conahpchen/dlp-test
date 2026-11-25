@@ -358,16 +358,52 @@ def test_legacy_block_policy_cannot_deny_visitor(lab, world):
     assert lab.visit(run,'index','a','127.0.0.1','browser')[0]==200
 
 
-def test_drafting_bounds_sources_and_review_still_reads_full_documents(model):
+def test_draft_and_review_use_excerpts_and_reviewer_receives_verified_tail_citation(model, monkeypatch):
     from research.generation import generate_scene
 
+    tail = "末尾保留的事实"
     documents = [{"id": "0", "fact_id": "fact-0", "path": "/kb/report.md",
-                  "content": "研发报表归档说明。" * 400 + "末尾保留的事实"}]
+                  "content": "研发报表归档说明。" * 400 + tail}]
+    choose = model.choose
+
+    def respond(messages):
+        result = choose(messages)
+        if "honeynet builder AI" in messages[0]["content"]:
+            result["nodes"][0]["sources"][0]["quote"] = tail
+        return result
+
+    monkeypatch.setattr(model, "choose", respond)
     generate_scene(model, documents, "整理研发报表说明")
     draft = json.loads(model.calls[0][-1]["content"])
     review = json.loads(model.calls[1][-1]["content"])
-    assert len(draft["sources"][0]["content"]) == 1600
-    assert review["sources"] == documents
+    assert len(draft["sources"][0]["content"]) == 800
+    assert review["sources"][0] == {**draft["sources"][0], "verified_quotes": [tail]}
+
+
+def test_rejected_review_does_not_trigger_another_draft(model):
+    from research.generation import generate_scene
+
+    model.reject_review = True
+    docs = [{"id": "0", "fact_id": "fact-0", "path": "/kb/report.md", "content": "报表归档说明。"}]
+    with pytest.raises(ValueError, match="Independent model review rejected scene"):
+        generate_scene(model, docs, "整理研发报表说明", require_verification=True)
+    assert len(model.calls) == 2
+
+
+def test_scene_candidate_context_keeps_relevant_relationship_within_limit():
+    from research.grounding import scene_context
+
+    def graph_node(number, kind="host", label=None):
+        return {"id": str(number), "kind": kind, "label": label or f"host-{number}"}
+
+    entities = [graph_node(number) for number in range(12)] + [graph_node(12, "database", "special-catalog")]
+    noise = [{"source": str(number), "target": str(number + 1), "relation": "communicates"}
+             for number in range(10)]
+    selected = {"source": "12", "target": "11", "relation": "hosted_on"}
+    graph = scene_context({"entities": entities, "relations": noise + [selected]}, "检查 special-catalog 数据库")
+    assert selected in graph["relations"] and len(graph["entities"]) <= 8
+    retained = {entity["id"] for entity in graph["entities"]}
+    assert all({edge["source"], edge["target"]} <= retained for edge in graph["relations"])
 
 
 @pytest.mark.parametrize("has_related_anchor", [True, False])
@@ -426,3 +462,95 @@ def test_scene_with_no_dws_relationship_does_not_call_model(model):
     with pytest.raises(ValueError, match="DWS snapshot contains no usable anchor relationship"):
         generate_scene(model, [], "生成目录巡检文档", {"entities": [], "relations": []})
     assert model.calls == []
+
+
+def test_saved_template_selects_relevant_passage_and_rejects_invalid_draft_without_retry(model, monkeypatch):
+    from types import SimpleNamespace
+
+    from research.template_generation import generate_template_scene, select_documents
+    from research.template_grounding import TemplateGroundingError
+
+    evidence = "备份恢复演练需要两人复核。"
+    documents = [dict(fact_id="general", path="/kb/a.md", content="通用资料" * 180),
+                 dict(fact_id="other", path="/kb/b.md", content="报销流程" * 180),
+                 dict(fact_id="recovery", path="/kb/recovery.md", content="其余事项" * 200 + evidence)]
+    candidates = [SimpleNamespace(payload=document) for document in documents]
+    with pytest.raises(TemplateGroundingError, match="world_scope_missing_source"):
+        select_documents(candidates, "引用 /kb/missing.md")
+    goal = "生成备份恢复演练核验说明"
+    selected = [item.payload for item in select_documents(candidates, goal)]
+    assert selected[0]["fact_id"] == "recovery" and len(selected) == 2
+    choose = model.choose
+
+    def respond(messages):
+        result = choose(messages)
+        source = json.loads(messages[-1]["content"])["sources"][0]
+        assert evidence in source["content"] and len(source["content"]) <= 360
+        result["nodes"][0]["sources"][0]["quote"] = "编造的引文"
+        return result
+
+    monkeypatch.setattr(model, "choose", respond)
+    with pytest.raises(ValueError, match="Unverifiable source quote"):
+        generate_template_scene(model, selected, goal, None, require_verification=True)
+    assert len(model.calls) == 1
+
+
+def test_saved_template_includes_endpoint_fields_only_for_endpoint_goal(model, monkeypatch):
+    from research.template_generation import generate_template_scene
+
+    documents = [dict(fact_id="kb-source", content="目录核验说明。")]
+    choose = model.choose
+
+    def respond(messages):
+        result = choose(messages)
+        if "honeynet builder AI" in messages[0]["content"]:
+            assert "use services" in messages[0]["content"]
+            result["services"] = [dict(id="catalog", method="GET", path="/catalog/check",
+                                       node_id="overview", data={"result": "ready"})]
+        else:
+            review = json.loads(messages[-1]["content"])
+            assert review["endpoint_data"] == [{"result": "ready"}]
+            assert "services" not in review
+        return result
+
+    monkeypatch.setattr(model, "choose", respond)
+    scene, review = generate_template_scene(model, documents, "创建目录查询接口", None, require_verification=False)
+    assert scene["services"][0]["path"] == "catalog/check"
+    assert len(model.calls) == 2 and review["accepted"]
+
+
+def test_saved_template_rejects_oversized_review_input_without_a_second_call(model, monkeypatch):
+    from research.template_generation import generate_template_scene
+    from research.template_grounding import TemplateGroundingError
+
+    choose = model.choose
+
+    def respond(messages):
+        result = choose(messages)
+        result["entry_node"] = "page-0"
+        result["nodes"] = [dict(id=f"page-{i}", title=f"Page {i}", body="复核流程" * 1000,
+                                links=[f"page-{i + 1}"] if i < 7 else []) for i in range(8)]
+        return result
+
+    monkeypatch.setattr(model, "choose", respond)
+    documents = [dict(fact_id="fact-a", content="目录核验说明。")]
+    with pytest.raises(TemplateGroundingError, match="scene_context_budget"):
+        generate_template_scene(model, documents, "创建校验说明", None, require_verification=False)
+    assert len(model.calls) == 1
+
+
+def test_template_scope_rejects_two_existing_but_unconnected_entries(monkeypatch):
+    from research.template_grounding import TemplateGroundingError, plan_scope, required_entries
+
+    monkeypatch.setenv("HONEYNET_COWRIE_HOST", "web01")
+    graph = {"entities": [
+        {"id": "ssh-node", "kind": "host", "label": "web01", "protocols": ["ssh"]},
+        {"id": "db-host", "kind": "host", "label": "db01", "protocols": ["mysql"]},
+        {"id": "database", "kind": "database", "label": "DB-CORE", "catalog_name": "collab_core"},
+    ], "relations": [{"source": "database", "target": "db-host", "relation": "hosted_on"}]}
+    goal = "SSH 资料和 MySQL 目录指向 DB-CORE"
+    with pytest.raises(TemplateGroundingError, match="world_scope_disconnected"):
+        plan_scope(graph, goal, required_entries(goal))
+    assert required_entries("生成 SSH 巡检说明，不涉及模拟 MySQL") == ("ssh",)
+    assert required_entries("SSH日志和MySQL目录使用同一个库名") == ("ssh", "mysql")
+    assert required_entries("生成巡检说明，引用 /kb/mysql/ssh.md") == ()

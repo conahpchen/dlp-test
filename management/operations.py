@@ -129,7 +129,7 @@ def operations_router(require_operator):
             metric("监听器有响应", f'{sum(r["status"] == "responding" for r in listeners)} / {len(listeners)}',
                    "按本次回环探测", "mint"),
             metric("当前发布依赖", release_names.get(health), "按已部署能力检查"),
-            metric("今日预留 Token", budget.get("reserved_tokens"), "控制面模型预算"),
+            metric("今日已计入 Token", budget.get("reserved_tokens"), "控制面模型预算"),
             metric("今日估算费用", budget.get("estimated_cost_microusd"), "单位为微美元", "warm"),
         ))
         inventory = "".join(f"""
