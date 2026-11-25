@@ -12,6 +12,7 @@ from business.storage import restore
 from dws.world import World
 from replay.engine import Engine
 from research.api import current_lab, install_routes
+from research.template_scenes import consume as consume_template_scenes
 from research.worker import automatic_enabled, consume, enabled
 
 
@@ -89,7 +90,7 @@ async def monitor_situations(stop, interval=15):
 @asynccontextmanager
 async def lifespan(_app):
     stop = asyncio.Event()
-    tasks = []
+    tasks = [asyncio.create_task(consume_template_scenes(current_lab, lambda: checkpoint()[0].world, stop))]
     if automatic_enabled():
         tasks.append(asyncio.create_task(bootstrap_scene(stop)))
     if enabled():

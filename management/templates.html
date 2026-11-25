@@ -6,14 +6,17 @@
     <div id="template-list" class="list" aria-label="模板列表"></div>
   </section>
   <section class="panel">
-    <div class="panel-header"><div><h2 id="editor-title">新增模板</h2><p>保存后产生一个可供场景生成引用的新修订。</p></div>
+    <div class="panel-header"><div><h2 id="editor-title">新增模板</h2><p>保存模板后，可以用该修订生成待审批场景。</p></div>
     <span class="tag" id="revision">新建</span></div>
     <form id="template-form">
       <label>名称 <input id="name" maxlength="100" required></label>
       <label>展示方式 <select id="variant"><option value="plain">普通知识库</option><option value="agent_note">带核验链接</option></select></label>
       <label>合成场景生成目标 <textarea id="goal" rows="7" maxlength="2000" required></textarea></label>
-      <div class="actions"><button type="submit">保存模板修订</button><a href="/releases">查看已生成场景 →</a></div>
+      <div class="actions"><button type="submit">保存模板修订</button>
+      <button id="generate-scene" type="button" disabled>生成场景</button>
+      <a id="generated-scene" hidden>查看候选场景 →</a></div>
       <p id="status" class="status" role="status" aria-live="polite"></p>
+      <p id="generation-status" class="status" role="status" aria-live="polite"></p>
     </form>
   </section>
 </div>
@@ -25,8 +28,58 @@ const nameField = document.querySelector('#name');
 const variant = document.querySelector('#variant');
 const goal = document.querySelector('#goal');
 const message = document.querySelector('#status');
+const generate = document.querySelector('#generate-scene');
+const generated = document.querySelector('#generated-scene');
+const generationMessage = document.querySelector('#generation-status');
 let templates = [];
 let selected = '';
+let generationState = null;
+let checking = false;
+let generationView = 0;
+let poll;
+
+function selectedTemplate() {
+  return templates.find(row => row.template_id === selected);
+}
+
+function updateGenerateButton() {
+  const item = selectedTemplate();
+  const dirty = item && (item.name !== nameField.value.trim() || item.variant !== variant.value || item.goal !== goal.value.trim());
+  generate.disabled = !item || dirty || checking || ['queued', 'running'].includes(generationState?.status);
+  generate.title = dirty || !item ? '请先保存模板修订' : '';
+}
+
+function showGeneration(state) {
+  generationState = state;
+  const labels = {queued:'等待控制面处理…', running:'控制面正在生成并校验场景…', ready:'场景已生成，可以打开并审批。'};
+  const errors = {model_unconfigured:'控制面尚未配置模型。', world_unavailable:'DWS 快照尚未就绪。',
+    model_unavailable:'模型暂不可用或达到调用预算。', verification_missing:'模型未生成可核验页面。'};
+  generationMessage.textContent = state?.status === 'failed'
+    ? `${errors[state.error] || '场景生成或校验失败。'} 可以重试。`
+    : labels[state?.status] || '';
+  generated.hidden = !state?.run_id;
+  if (state?.run_id) generated.href = '/releases?' + new URLSearchParams({run:state.run_id});
+  updateGenerateButton();
+}
+
+async function pollGeneration(item, view) {
+  try {
+    const path = '/api/templates/' + encodeURIComponent(item.template_id) + '/revisions/' + item.revision + '/scene';
+    const response = await fetch(path, {cache:'no-store'});
+    if (!response.ok) throw new Error('无法读取场景生成状态，重新选择模板可刷新。');
+    const state = await response.json();
+    if (view !== generationView) return;
+    checking = false;
+    showGeneration(state);
+    if (['queued', 'running'].includes(state?.status)) poll = setTimeout(() => pollGeneration(item, view), 1000);
+  } catch (error) {
+    if (view !== generationView) return;
+    checking = false;
+    generationMessage.textContent = error.message;
+    updateGenerateButton();
+    if (['queued', 'running'].includes(generationState?.status)) poll = setTimeout(() => pollGeneration(item, view), 3000);
+  }
+}
 
 function renderList() {
   const term = search.value.trim().toLocaleLowerCase();
@@ -49,26 +102,60 @@ function renderList() {
 }
 function select(identifier) {
   selected = identifier;
-  const item = templates.find(row => row.template_id === selected);
+  const item = selectedTemplate();
+  const url = new URL(location.href);
+  if (item) url.searchParams.set('template', selected);
+  else url.searchParams.delete('template');
+  history.replaceState(null, '', url);
   nameField.value = item?.name ?? '';
   goal.value = item?.goal ?? '';
   variant.value = item?.variant ?? 'plain';
   document.querySelector('#editor-title').textContent = item ? '编辑模板' : '新增模板';
   document.querySelector('#revision').textContent = item ? '当前修订 ' + item.revision : '新建';
   message.textContent = '';
+  clearTimeout(poll);
+  const view = ++generationView;
+  checking = Boolean(item);
+  showGeneration(null);
+  if (item) pollGeneration(item, view);
   renderList();
 }
 async function refresh(identifier = '') {
   const response = await fetch('/api/templates');
   if (!response.ok) throw new Error('无法读取模板');
   templates = await response.json();
-  select(identifier || templates[0]?.template_id || '');
+  const preferred = templates.find(row => row.template_id === identifier);
+  select(preferred?.template_id || templates[0]?.template_id || '');
 }
 search.oninput = renderList;
+form.addEventListener('input', updateGenerateButton);
 document.querySelector('#new-template').onclick = () => { select(''); nameField.focus(); };
+generate.onclick = async () => {
+  const item = selectedTemplate();
+  const view = ++generationView;
+  checking = true;
+  updateGenerateButton();
+  generationMessage.textContent = '正在提交生成请求…';
+  try {
+    const response = await fetch('/api/template-scenes', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({template_id:item.template_id, revision:item.revision})
+    });
+    if (!response.ok) throw new Error(response.status === 429 ? '生成队列已满，请稍后重试。' : '无法提交生成请求。');
+    const state = await response.json();
+    if (view !== generationView) return;
+    showGeneration(state);
+    await pollGeneration(item, view);
+  } catch (error) {
+    if (view !== generationView) return;
+    checking = false;
+    generationMessage.textContent = error.message;
+    updateGenerateButton();
+  }
+};
 form.onsubmit = async event => {
   event.preventDefault();
-  const item = templates.find(row => row.template_id === selected);
+  const item = selectedTemplate();
   const body = {
     name: nameField.value, variant: variant.value, goal: goal.value,
     template_id:item?.template_id ?? null, expected_revision:item?.revision ?? 0
@@ -90,5 +177,5 @@ form.onsubmit = async event => {
     button.disabled = false;
   }
 };
-refresh().catch(error => { message.textContent = error.message; });
+refresh(new URLSearchParams(location.search).get('template')).catch(error => { message.textContent = error.message; });
 </script>

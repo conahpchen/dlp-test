@@ -39,6 +39,10 @@ class ResearchLab:
                 PRIMARY KEY(template_id, revision));
             INSERT OR IGNORE INTO template_revisions VALUES
                 ('operations', 1, '运维知识库', 'plain', '生成有业务关联的知识库与运维排查线索');
+            CREATE TABLE IF NOT EXISTS template_scene_jobs (
+                template_id TEXT NOT NULL, revision INTEGER NOT NULL, id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL, lease TEXT, leased_until INTEGER, error TEXT,
+                PRIMARY KEY(template_id, revision));
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, plan TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS version_bindings (
                 id TEXT PRIMARY KEY, run TEXT NOT NULL, world_id TEXT NOT NULL,
@@ -200,7 +204,8 @@ class ResearchLab:
             db.execute('INSERT INTO template_revisions VALUES (?,?,?,?,?)', row)
         return self._template(row)
 
-    def create(self, world, variant, model=None, goal=None, template=None, *, automatic=False):
+    def create(self, world, variant, model=None, goal=None, template=None, *, automatic=False,
+               scene_job=None, require_verification=False):
         if variant not in VARIANTS:
             raise ValueError('Unsupported variant')
         version = world.meta['world_version']
@@ -209,7 +214,7 @@ class ResearchLab:
                        and not f.payload.get('canary')), key=lambda f: f.payload['path'])[:3]
         if not docs:
             raise ValueError('No grounded knowledge documents available')
-        run_id = secrets.token_hex(16)
+        run_id = scene_job[0] if scene_job else secrets.token_hex(16)
         plan = dict(run_id=run_id, version=1, variant=variant,
                     world_version=version,
                     world_id=world.meta.get('world_id'), base_seconds=world.meta['base_seconds'],
@@ -241,13 +246,19 @@ class ResearchLab:
                 plan['publication_required'] = True
                 plan['fact_schema'] = 1
                 plan['entity_graph'] = project(world, version, plan['documents'])
-            scene, review = generate_scene(model, plan['documents'], draft_goal, plan.get('entity_graph'))
+            scene, review = generate_scene(model, plan['documents'], draft_goal, plan.get('entity_graph'),
+                                           require_verification=require_verification)
             if automatic:
                 if not requests_for(scene) <= allowed:
                     raise ValueError('Scene requests a capability outside the automatic publication policy')
                 plan['automatic'] = True
             plan.update(origin='ai', scene=scene, generation=dict(model=model.name, review=review, goal=goal))
         with self.connect() as db:
+            if scene_job:
+                reserved = db.execute("UPDATE template_scene_jobs SET status='ready',lease=NULL,leased_until=NULL "
+                                      "WHERE id=? AND lease=? AND status='running'", scene_job)
+                if not reserved.rowcount:
+                    raise RuntimeError("Template generation lease changed")
             db.execute('INSERT INTO runs VALUES (?, ?)', (run_id, json.dumps(plan)))
         return dict(run_id=run_id, version=1, variant=variant,
                     entry=f'/decoy/{run_id}/index', origin=plan['origin'], world_version=plan['world_version'])
