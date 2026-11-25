@@ -57,6 +57,67 @@ def test_templates_are_authenticated_revisioned_and_used_in_runs(monkeypatch, tm
     assert plan["template"] == {"template_id": identifier, "revision": 1}
 
 
+def test_operator_generates_reviewable_scene_from_saved_template(monkeypatch, tmp_path, demo_seed):
+    import json
+    import time
+
+    from dws.world import World
+    from replay.engine import Engine
+    from research import control_app, template_scenes
+    from research.api import current_lab
+    from tests.test_generative_research import SceneModel
+
+    monkeypatch.setenv("RESEARCH_STATE_FILE", str(tmp_path / "research.sqlite"))
+    monkeypatch.setenv("HONEYNET_DASHBOARD_PASSWORD", "synthetic-test")
+    monkeypatch.setenv("RESEARCH_AUTOMATIC_DECOYS", "0")
+    monkeypatch.setenv("RESEARCH_UNIFIED_PUBLICATION", "0")
+    monkeypatch.setattr(control_app, "checkpoint", lambda: (Engine(World(demo_seed)), {}))
+
+    class ModelMissingFirstVerification(SceneModel):
+        def choose(self, messages):
+            result = super().choose(messages)
+            if len(self.calls) == 1:
+                result["nodes"][1]["lure_instruction"] = None
+            if len(self.calls) == 2:
+                context = json.loads(messages[-1]["content"])
+                assert "lure_instruction" in context["validation_feedback"]["instruction"]
+            return result
+
+    model = ModelMissingFirstVerification()
+    monkeypatch.setattr(template_scenes, "Model", lambda: model)
+    dashboard = TestClient(management)
+    operator = ("operator", "synthetic-test")
+    template = dashboard.post("/api/templates", auth=operator, json={
+        "name": "运维核验", "variant": "agent_note", "goal": "生成一份设备巡检说明",
+    }).json()
+    identifier, revision = template["template_id"], template["revision"]
+    request = {"template_id": identifier, "revision": revision}
+    status = f"/api/templates/{identifier}/revisions/{revision}/scene"
+    assert dashboard.post("/api/template-scenes", json=request).status_code == 401
+    assert dashboard.get(status).status_code == 401
+    for _ in range(2):
+        response = dashboard.post("/api/template-scenes", auth=operator, json=request)
+        assert response.status_code == 202 and response.json()["status"] == "queued"
+    lab = current_lab()
+    with lab.connect() as db:
+        assert db.execute("SELECT count(*) FROM template_scene_jobs").fetchone() == (1,)
+        db.execute("UPDATE template_scene_jobs SET status='running', lease='crashed', leased_until=0")
+
+    with TestClient(control_app.app):
+        deadline = time.monotonic() + 5
+        while (job := dashboard.get(status, auth=operator).json())["status"] in ("queued", "running"):
+            assert time.monotonic() < deadline
+            time.sleep(.05)
+    assert job["status"] == "ready"
+    assert lab.active() is None
+    plan = lab.plan(job["run_id"])
+    assert plan["template"] == {"template_id": identifier, "revision": revision}
+    assert any(node["lure_instruction"] for node in plan["scene"]["nodes"])
+    assert len(model.calls) == 3
+    assert any(row["run_id"] == job["run_id"] and not row["active"]
+               for row in dashboard.get("/api/evidence/runs", auth=operator).json())
+
+
 def test_alerts_show_actual_interactions_and_keep_credentials_out(monkeypatch, tmp_path):
     from pathlib import Path
 

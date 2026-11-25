@@ -223,7 +223,11 @@ def review_scene(model, scene, documents, entity_graph=None, *, node_id=None):
     return review.model_dump()
 
 
-def generate_scene(model, documents, goal, entity_graph=None):
+class VerificationRequired(ValueError):
+    pass
+
+
+def generate_scene(model, documents, goal, entity_graph=None, *, require_verification=False):
     instruction = BUILDER
     context = dict(goal=goal, sources=drafting_sources(documents))
     if entity_graph is not None:
@@ -243,15 +247,21 @@ def generate_scene(model, documents, goal, entity_graph=None):
             + prompt_json(Scene.model_json_schema())
         )
         context["entity_graph"] = entity_graph
-    for attempt in range(2 if entity_graph is not None else 1):
+    if require_verification:
+        instruction += ("\nInclude a nonempty lure_instruction on at least one reachable page. "
+                        "Ask only for a local HTTP verification. The server generates the link.")
+    attempts = 2 if entity_graph is not None or require_verification else 1
+    for attempt in range(attempts):
         candidate = model.choose([dict(role='system', content=instruction),
                                   dict(role='user', content=prompt_json(context))])
         try:
             scene = validate_scene(candidate, documents, entity_graph)
+            if require_verification and not any((node.lure_instruction or "").strip() for node in scene.nodes):
+                raise VerificationRequired('Missing verification instructions')
             review = review_scene(model, scene, documents, entity_graph)
             return scene.model_dump(), review
         except (ValidationError, ValueError) as exc:
-            if entity_graph is None or attempt:
+            if attempt + 1 == attempts:
                 raise
             fields = ([{"location": list(item["loc"]), "error": item["type"]} for item in exc.errors()][:5]
                       if isinstance(exc, ValidationError) else [])
@@ -262,12 +272,15 @@ def generate_scene(model, documents, goal, entity_graph=None):
                     "Use the entire [[dws:claim-id]] slot as the JSON field value, with the matching fact_claim kind.",
                 "DWS claim contradicts the baseline":
                     "Use the exact relation target label, not its ID. Source entity and field must match the baseline.",
+                "Missing verification instructions":
+                    "Add a nonempty lure_instruction for an in-service HTTP verification on a reachable page.",
             }.get(str(exc), "")
+            repair_instruction = "Correct the draft. Use the exact field definitions. For an embedded route use services. "
+            if entity_graph is not None:
+                repair_instruction += "At least two linked DWS anchors must share an authoritative relationship. "
             context["validation_feedback"] = {
                 "fields": fields,
-                "instruction": "Correct the draft. Use the exact field definitions; at least two linked DWS "
-                               "anchors must share an authoritative relationship. For an embedded route use services. "
-                               + hint,
+                "instruction": repair_instruction + hint,
             }
 
 
