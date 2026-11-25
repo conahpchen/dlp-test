@@ -91,6 +91,16 @@ RELATION_TARGETS = {
 }
 
 
+class DisconnectedDWSAnchors(ValueError):
+    pass
+
+
+def anchor_relationships(graph):
+    targets = {item["id"] for item in graph["entities"] if item["kind"] in RELATION_TARGETS["reviews"]}
+    return [edge for edge in graph["relations"] if edge["source"] != edge["target"]
+            and {edge["source"], edge["target"]} <= targets]
+
+
 def validate(anchors, node_ids, graph, *, minimum):
     kinds = {item["id"]: item["kind"] for item in graph["entities"]}
     keys = {(edge.node_id, edge.entity_id) for edge in anchors}
@@ -99,8 +109,8 @@ def validate(anchors, node_ids, graph, *, minimum):
                    for edge in anchors)):
         raise ValueError("Invalid DWS entity anchors")
     targets = {target for _, target in keys}
-    if minimum > 1 and not any({edge["source"], edge["target"]} <= targets for edge in graph["relations"]):
-        raise ValueError("DWS anchors must include an existing relationship")
+    if minimum > 1 and not any({edge["source"], edge["target"]} <= targets for edge in anchor_relationships(graph)):
+        raise DisconnectedDWSAnchors("DWS anchors must include an existing relationship")
     return [edge.model_dump() for edge in anchors]
 
 

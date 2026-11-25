@@ -14,6 +14,16 @@ from research.model_budget import ModelBudget, budget_path
 MAX_PROMPT_BYTES = 96_000
 
 
+class ModelProviderError(RuntimeError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f'Model provider returned HTTP {status_code}')
+
+
+class ModelResponseError(RuntimeError):
+    pass
+
+
 @lru_cache(maxsize=8)
 def _budget(state_path, provider, name, account):
     return ModelBudget.configured(Path(state_path))
@@ -59,17 +69,23 @@ class Model:
                                    json=payload)
         # Do not echo provider errors which may contain credentials or reflected input.
         if response.status_code != 200:
-            raise RuntimeError(f'Model provider returned HTTP {response.status_code}')
-        data = response.json()
-        choice = data['choices'][0]
-        content = choice['message'].get('content') or ''
+            raise ModelProviderError(response.status_code)
+        try:
+            data = response.json()
+            choice = data['choices'][0]
+            content = choice['message']['content']
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise ModelResponseError('Model returned an invalid completion') from None
+        if not isinstance(content, str) or not content.strip() or choice.get('finish_reason') == 'length':
+            raise ModelResponseError('Model returned truncated or empty structured output')
         metadata = dict(model=data.get('model'), usage=data.get('usage'),
                                            finish_reason=choice.get('finish_reason'), content_characters=len(content))
-        if choice.get('finish_reason') == 'length' or not content.strip():
-            raise RuntimeError('Model returned truncated or empty structured output')
-        result = json.loads(content)
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            raise ModelResponseError('Model returned invalid JSON content') from None
         if not isinstance(result, dict):
-            raise RuntimeError("Model output must be a JSON object")
+            raise ModelResponseError('Model output must be a JSON object')
         return result, metadata
 
 
