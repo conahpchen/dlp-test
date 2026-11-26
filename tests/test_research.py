@@ -410,3 +410,20 @@ def test_model_budget_renews_without_blocking_new_sessions(lab, world, monkeypat
     clock[0] += controller.DECISION_WINDOW
     assert controller.adapt(lab, run, 'a', model, interval=1)['status'] == 'applied'
     assert model.calls == 3
+
+
+
+def test_probe_statistics_do_not_classify_an_agent_or_group_sessions_by_network():
+    from research.analysis import session_agent_assessments
+
+    def event(identifier, session, port, probe=None):
+        return dict(event_id=identifier, session=session, dst={"port": port}, src={"ip": "192.0.2.0/24"},
+                    what={"kind": "web.request", "probe": probe})
+
+    events = [event(str(i), "visitor-a" if i < 2 else "visitor-b", 8000 + i) for i in range(4)]
+    events.extend(event("probe-" + str(i), "visitor-c", 8080, probe)
+                  for i, probe in enumerate(("test-target-a", "test-target-b", "test-target-c")))
+    profiles = session_agent_assessments(events, [])
+    assert profiles["visitor-a"]["signals"] == profiles["visitor-b"]["signals"] == {}
+    assert "multi_target_probe" in profiles["visitor-c"]["signals"]
+    assert not profiles["visitor-c"]["suspected"]

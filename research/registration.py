@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from research.analysis import analyze
+from research.analysis import analyze, session_agent_assessments
 
 
 class AgentDeclaration(BaseModel):
@@ -92,20 +92,20 @@ def install_registration(app, lab_provider):
             raise HTTPException(409, "声明已登记") from None
 
 
-def evidence(lab, run):
+def evidence(lab, run, *, include_registrations=True, include_agent_assessments=False):
     with lab.connect() as db:
         plan = lab._plan(db, run)
         rows = db.execute(
             "SELECT session,registration_id,claim,recorded_at FROM agent_registrations "
             "WHERE run=? ORDER BY rowid", (run,),
-        ).fetchall()
+        ).fetchall() if include_registrations else []
         events = [json.loads(row[0]) for row in db.execute(
             "SELECT payload FROM events WHERE run=? ORDER BY id", (run,),
         )]
         decisions = [json.loads(row[0]) for row in db.execute(
             "SELECT payload FROM decisions WHERE run=? ORDER BY id", (run,),
         )]
-    profiles = {row["session"]: row for row in analyze(events)}
+    profiles = {row["session"]: row for row in analyze(events)} if rows else {}
     evidence_rows = []
     for session, registration_id, claim, recorded_at in rows:
         profile = profiles.get(session, {})
@@ -155,6 +155,7 @@ def evidence(lab, run):
             "world_version": event["dws_version"],
             "logical_time": event["ts_hlc"],
             "resource": resource,
+            "source_network": (event.get("src") or {}).get("ip"),
             "method": what.get("method"),
             "status": what.get("status"),
             "title": title,
@@ -174,4 +175,7 @@ def evidence(lab, run):
             "evidence_event_ids": decision.get("evidence_event_ids") or record.get("evidence_window", []),
             "error_code": record.get("error_code"),
         })
-    return {"registrations": evidence_rows, "timeline": timeline, "generation": generation}
+    data = {"registrations": evidence_rows, "timeline": timeline, "generation": generation}
+    if include_agent_assessments:
+        data["agent_assessments"] = session_agent_assessments(events, decisions)
+    return data

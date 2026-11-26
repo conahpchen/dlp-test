@@ -11,7 +11,8 @@
 <article class="metric"><h2>时间线事件</h2><strong id="metric-events">—</strong><p>记录的访问、请求和投放</p></article>
 <article class="metric"><h2>AI 决策记录</h2><strong id="metric-decisions">—</strong><p>包含通过和拒绝结果</p></article></section>
 <section class="panel" data-section="session"><div class="panel-header"><div><h2>Web 事件时间线</h2>
-<p>查看请求了什么、服务返回什么，以及对应的 DWS 版本。</p><p id="capture-status"></p></div><a href="/canary">查看 Canary →</a></div>
+<p>查看请求了什么、服务返回什么，以及对应的 DWS 版本。</p><p id="capture-status"></p></div>
+<div class="actions"><a id="session-profile-link" href="/profiles">查看攻击者画像 →</a><a href="/canary">查看 Canary →</a></div></div>
 <!-- timeline tools --><div class="table-scroll" id="timeline-table"><table>
 <thead><tr><th>序号</th><th>会话</th><th>发生了什么</th><th>请求或交付内容</th><th>HTTP 状态</th><th>DWS 版本</th></tr></thead>
 <tbody id="timeline"></tbody></table></div></section>
@@ -216,6 +217,9 @@ const businessActivities = {read_database_catalog:'查看数据库目录', read_
 function renderTimeline() {
   if (!selectedEvidence) return;
   const filter = sessions.value;
+  const profileParams = new URLSearchParams({run:runs.value});
+  if (filter) profileParams.set('session', filter);
+  document.querySelector('#session-profile-link').href = '/profiles?' + profileParams;
   const matches = item => !filter || item.session === filter;
   const timelineRows = selectedEvidence.timeline.filter(matches);
   const positions = new Map(selectedEvidence.timeline.map((event, index) => [event.event_id, index+1]));
@@ -332,6 +336,7 @@ function renderChains() {
     evidence.href = '/evidence?' + params;
     evidence.textContent = '打开来源会话证据';
     source.append(evidence);
+    source.append(profileLink(runs.value, path.source_session));
     const arrow = document.createElement('span');
     arrow.className = 'chain-arrow';
     arrow.setAttribute('aria-hidden','true');
@@ -345,6 +350,7 @@ function renderChains() {
       });
       target.className = use.associated ? 'chain-target' : 'chain-target withdrawn';
       appendNetwork(target, use.network_evidence);
+      target.append(profileLink(runs.value, use.session));
       target.append(responseLink(runs.value, use.associated ? 'detach' : 'restore', use.use_id,
                                  use.associated ? '申请撤销关联' : '申请恢复关联'));
       targets.append(target);
@@ -359,6 +365,12 @@ function renderChains() {
     empty.textContent = '当前筛选下暂无已交付且被使用的标记。';
     root.append(empty);
   }
+}
+function profileLink(run, session) {
+  const link = document.createElement('a');
+  link.href = '/profiles?' + new URLSearchParams({run, session});
+  link.textContent = '查看会话画像';
+  return link;
 }
 async function loadChains(selected) {
   const data = await get('/api/evidence/runs/' + encodeURIComponent(selected) + '/chains');

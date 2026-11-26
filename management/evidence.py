@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from audit.flow_evidence import matches
 from management.layout import fragment, page, table_tools
+from management.profiles import profile_page
 from management.publications import json_only
 from research.api import current_lab
 from research.artifacts import graph_summary, scene_summary
@@ -34,6 +35,16 @@ def evidence_router(require_operator):
     def chains():
         return evidence_page("/chains", "攻击链路", "从实际交付的 Canary 回溯来源，查看它在哪些入口出现。", "chain")
 
+    @router.get("/profiles", response_class=HTMLResponse)
+    def profiles(run: str | None = Query(default=None, pattern=r"^[a-f0-9]{32}$"),
+                 session: str | None = Query(default=None, max_length=256)):
+        lab = current_lab()
+        try:
+            return profile_page(lab, evidence_runs(lab), run, session,
+                                lambda selected: observed_chains(lab, selected, include_network=False))
+        except KeyError as exc:
+            raise HTTPException(404, "Unknown run") from exc
+
     @router.get("/canary", response_class=HTMLResponse)
     def canary():
         return evidence_page("/canary", "Canary 凭据", "核对标记签发、真实响应回执和后续使用关联。", "canary")
@@ -49,15 +60,7 @@ def evidence_router(require_operator):
 
     @router.get("/api/evidence/runs")
     def runs():
-        lab = current_lab()
-        with lab.connect() as db:
-            plans = [json.loads(row[0]) for row in db.execute(
-                "SELECT plan FROM runs ORDER BY rowid DESC LIMIT 100"
-            )]
-        active = lab.active()
-        return [{**{field: plan.get(field) for field in ("run_id", "variant", "origin", "world_version")},
-                 "active": plan["run_id"] == active, "title": (plan.get("scene") or {}).get("title")}
-                for plan in plans]
+        return evidence_runs(current_lab())
 
     @router.get("/api/evidence/runs/{run_id}")
     def detail(run_id: str):
@@ -134,6 +137,15 @@ def evidence_router(require_operator):
     return router
 
 
+def evidence_runs(lab):
+    with lab.connect(write=False) as db:
+        plans = [json.loads(row[0]) for row in db.execute("SELECT plan FROM runs ORDER BY rowid DESC LIMIT 100")]
+    active = lab.active()
+    return [{**{field: plan.get(field) for field in ("run_id", "variant", "origin", "world_version")},
+             "active": plan["run_id"] == active, "title": (plan.get("scene") or {}).get("title")}
+            for plan in plans]
+
+
 def issued_credentials(lab, run):
     with lab.connect() as db:
         rows = db.execute(
@@ -147,7 +159,7 @@ def issued_credentials(lab, run):
         return [dict(zip(fields, row)) for row in rows]
 
 
-def observed_chains(lab, run):
+def observed_chains(lab, run, *, include_network=True):
     """Only link matched use evidence to an actual response receipt."""
     with lab.connect() as db:
         lab._plan(db, run)
@@ -171,6 +183,8 @@ def observed_chains(lab, run):
                                             "target_entry": scope})
         path["uses"].append({"use_id": use, "entry": entry, "session": target,
                              "observed_at": observed, "associated": bool(associated)})
+    if not include_network:
+        return list(paths.values())
     sessions = {path["source_session"] for path in paths.values()}
     sessions.update(use["session"] for path in paths.values() for use in path["uses"])
     network = matches(os.environ.get("HONEYNET_FLOW_STATE_FILE"), sessions)
