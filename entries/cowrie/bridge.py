@@ -25,7 +25,6 @@ import os
 import re
 import sqlite3
 import sys
-import time
 from collections import OrderedDict
 from hmac import compare_digest
 from pathlib import Path
@@ -102,12 +101,16 @@ def main(argv=None) -> int:
     parser.add_argument("--node", default="sensor-a")
     parser.add_argument("--dst-host", default="web01", help="该入口对应的假主机名")
     parser.add_argument("--follow", action="store_true", help="跟随追加（部署模式）")
+    parser.add_argument("--cursor", type=Path, help="在跟随模式下持久化读取位置")
     parser.add_argument("--canary-state", help="本地研究 SQLite 凭据账本")
     parser.add_argument("--alerts-only", action="store_true", help="采集告警，无需文件或 Redis 输出")
     args = parser.parse_args(argv)
 
     if not args.out and not args.redis and not args.alerts_only:
         parser.error("需要 --out 或 --redis 之一")
+
+    if args.cursor and not args.follow:
+        parser.error("--cursor requires --follow")
 
     lab = None
     if args.canary_state:
@@ -119,7 +122,7 @@ def main(argv=None) -> int:
     if args.out:
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_fh = out_path.open("a", encoding="utf-8", newline="\n")
+        out_fh = out_path.open("a", encoding="utf-8", newline="\n", buffering=1)
     if args.redis:
         try:
             import redis
@@ -136,13 +139,6 @@ def main(argv=None) -> int:
     employee_sessions = OrderedDict()
 
     src_path = Path(args.src)
-    if args.follow and not src_path.exists():
-        # 部署模式：Cowrie 首个事件到来才会创建日志文件，等待其就绪
-        print(f"bridge: 等待日志文件就绪 {src_path} …", flush=True)
-        while not src_path.exists():
-            time.sleep(1.0)
-        print("bridge: 日志文件已就绪", flush=True)
-
     def handle(line: str) -> None:
         nonlocal counter, skipped
         line = line.strip()
@@ -221,29 +217,22 @@ def main(argv=None) -> int:
         if sink is not None:
             sink.publish("events.raw.ssh", payload)
 
-    fh = open(args.src, "r", encoding="utf-8", errors="replace")
-    for line in fh:
-        handle(line)
-    if args.out:
-        out_fh.flush()
-    if not args.follow:
-        fh.close()
+    try:
+        if args.follow:
+            from entries.cowrie.runtime.follow_events import follow
+
+            for line in follow(src_path, args.cursor):
+                handle(line.decode("utf-8", errors="replace"))
+        else:
+            with src_path.open(encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    handle(line)
+            print(f"bridge: 转换 {counter} 条事件（跳过 {skipped} 行非映射记录）")
+    except KeyboardInterrupt:
+        pass
+    finally:
         if args.out:
             out_fh.close()
-        print(f"bridge: 转换 {counter} 条事件（跳过 {skipped} 行非映射记录）")
-        return 0
-
-    # 跟随模式：文件保持打开，轮询追加（部署期 Cowrie 持续写 cowrie.json）
-    try:
-        while True:
-            for line in fh:
-                handle(line)
-            if args.out:
-                out_fh.flush()
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        fh.close()
-        print(f"bridge: 退出，共转换 {counter} 条（跳过 {skipped}）")
     return 0
 
 

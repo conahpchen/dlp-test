@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+**/.env
+**/.env.*
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+var
+artifacts
+deploy/docker/private
+**/*.sqlite
+**/*.sqlite-*

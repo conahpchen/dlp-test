@@ -49,7 +49,8 @@ def mysql_catalog_ready():
         port = int(os.environ.get("HONEYNET_MYSQL_PORT", "3307"))
         if not 1 <= port <= 65535:
             return False
-        with pymysql.connect(host="127.0.0.1", port=port, user="catalog_reader", password=password,
+        with pymysql.connect(host=os.environ.get("HONEYNET_MYSQL_HEALTH_HOST", "127.0.0.1"),
+                             port=port, user="catalog_reader", password=password,
                              connect_timeout=2, read_timeout=2, write_timeout=2) as conn, conn.cursor() as cursor:
             cursor.execute("SELECT name, engine FROM collab_core.catalog")
             return bool(cursor.fetchall())
@@ -126,7 +127,8 @@ def http_listener_ready(_plan):
         if not 1 <= port <= 65535:
             return False
         with httpx.Client(timeout=2, trust_env=False) as client:
-            reply = client.get(f"http://127.0.0.1:{port}/healthz")
+            host = os.environ.get("HONEYNET_VISITOR_HEALTH_HOST", "127.0.0.1")
+            reply = client.get(f"http://{host}:{port}/healthz")
             return reply.status_code == 200 and reply.json() == {"service": "honeynet-visitor"}
     except (httpx.HTTPError, OSError, ValueError):
         return False
@@ -193,7 +195,8 @@ def verify_candidate(lab, plan, manifest):
         db.execute("INSERT INTO release_probes VALUES (?,?,?,?)",
                    (plan["run_id"], key, int(time()) + 30, json.dumps(manifest)))
     try:
-        with httpx.Client(base_url=f"http://127.0.0.1:{int(port)}", timeout=2, trust_env=False) as client:
+        host = os.environ.get("HONEYNET_VISITOR_HEALTH_HOST", "127.0.0.1")
+        with httpx.Client(base_url=f"http://{host}:{int(port)}", timeout=2, trust_env=False) as client:
             for method, resource, expected in cases:
                 response = client.request(method, root + resource, headers={PROBE_HEADER: token})
                 if response.status_code != 200 or response.json() != expected:

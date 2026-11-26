@@ -5,6 +5,7 @@
 - [项目介绍](docs/PROJECT_OVERVIEW_ZH.md) — 能力、模块和工作原理
 - [部署实施手册](docs/DEPLOYMENT_RUNBOOK_ZH.md) — 安装、启动、验收和回退
 - [演示与自动模式](docs/DEMO_V2.md) — 本地演示和自动投放配置
+- [Docker Compose 部署](docs/COMPOSE_DEPLOYMENT_ZH.md)
 - [设计与实现索引](docs/README.md) — 详细架构、接口和研究说明
 - [需求追踪](docs/REQUIREMENTS_TRACEABILITY.md) · [历史实测记录](docs/PROGRESS_V2.md)
 

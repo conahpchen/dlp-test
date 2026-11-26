@@ -273,7 +273,8 @@ async def main():
     lab = current_lab()
     canaries = lab if handoffs.enabled() or os.environ.get("HONEYNET_ENABLE_MYSQL_CANARY") == "1" else None
     server = create_server(checkpoint, os.environ.get("HONEYNET_MYSQL_PASSWORD", ""), canaries, bindings=lab)
-    await server.start_server(host="127.0.0.1", port=int(os.environ.get("HONEYNET_MYSQL_PORT", "3307")))
+    await server.start_server(host=os.environ.get("HONEYNET_MYSQL_BIND", "127.0.0.1"),
+                              port=int(os.environ.get("HONEYNET_MYSQL_PORT", "3307")))
     await server.serve_forever()
 
 

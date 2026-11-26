@@ -1,0 +1,315 @@
+x-python: &python
+  image: dlp-honeynet-app:local
+  pull_policy: never
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=32m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+x-world-env: &world-env
+  BUSINESS_STATE_FILE: /state/runtime/world.sqlite
+  RESEARCH_STATE_FILE: /state/runtime/research.sqlite
+  HONEYNET_ALERTS_FILE: /state/runtime/alerts.sqlite
+  RESEARCH_AUTOMATIC_DECOYS: ${RESEARCH_AUTOMATIC_DECOYS:-0}
+  RESEARCH_UNIFIED_PUBLICATION: "1"
+  HONEYNET_DWS_ATOMIC: "1"
+  HONEYNET_CANARY_HANDOFFS: "1"
+
+x-runtime-mount: &runtime-mount
+  type: volume
+  source: state
+  target: /state/runtime
+  volume:
+    subpath: runtime
+
+x-nginx: &nginx
+  image: dlp-honeynet-proxy:local
+  pull_policy: never
+  user: "101:101"
+  entrypoint: [nginx, -g, "daemon off;"]
+  read_only: true
+  tmpfs:
+    - /tmp:size=24m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  restart: unless-stopped
+
+services:
+  init-state:
+    <<: *python
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    user: "0:0"
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    entrypoint: [/bin/sh, /app/deploy/docker/init-state.sh]
+    network_mode: none
+    restart: "no"
+    volumes: [state:/state]
+
+  visitor:
+    <<: *python
+    command: [visitor]
+    networks: [decoys]
+    environment:
+      <<: *world-env
+      HONEYNET_VISITOR_ONLY: "1"
+      RESEARCH_ASYNC_ADAPTATION: "1"
+      HONEYNET_COWRIE_EXPORT: /state/cowrie/world.sqlite
+      HONEYNET_LATENCY_FILE: /state/runtime/http.sqlite
+      HONEYNET_EMPLOYEE_WEB_BIZ01_SECRET: ${HONEYNET_EMPLOYEE_WEB_BIZ01_SECRET:-}
+      HONEYNET_EMPLOYEE_LLM_BIZ01_SECRET: ${HONEYNET_EMPLOYEE_LLM_BIZ01_SECRET:-}
+      HONEYNET_EMPLOYEE_LLM_MANAGER01_SECRET: ${HONEYNET_EMPLOYEE_LLM_MANAGER01_SECRET:-}
+    volumes: [state:/state]
+    depends_on:
+      init-state:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8080/healthz', timeout=2).status == 200"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  edge:
+    <<: *nginx
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.nginx
+    command: [-c, /etc/nginx/edge.conf]
+    networks: [decoys, public-ingress]
+    ports:
+      - "${HONEYNET_PUBLIC_BIND:-127.0.0.1}:${HONEYNET_WEB_PORT:-8080}:8080"
+    depends_on:
+      visitor:
+        condition: service_healthy
+
+  mysql:
+    <<: *python
+    command: [mysql]
+    networks: [decoys, public-ingress]
+    ports:
+      - "${HONEYNET_PUBLIC_BIND:-127.0.0.1}:${HONEYNET_MYSQL_PORT:-3307}:3307"
+    environment:
+      <<: *world-env
+      HONEYNET_MYSQL_BIND: "0.0.0.0"
+      HONEYNET_MYSQL_PASSWORD: ${HONEYNET_MYSQL_PASSWORD:?configure HONEYNET_MYSQL_PASSWORD}
+      HONEYNET_MYSQL_CONNECTIONS_PER_10S: ${HONEYNET_MYSQL_CONNECTIONS_PER_10S:-0}
+      HONEYNET_MYSQL_QUERIES_PER_10S: ${HONEYNET_MYSQL_QUERIES_PER_10S:-0}
+      HONEYNET_EMPLOYEE_MYSQL_DBA01_SECRET: ${HONEYNET_EMPLOYEE_MYSQL_DBA01_SECRET:-}
+      HONEYNET_EMPLOYEE_MYSQL_TEST01_SECRET: ${HONEYNET_EMPLOYEE_MYSQL_TEST01_SECRET:-}
+    volumes:
+      - *runtime-mount
+    depends_on:
+      visitor:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',3307),2); assert s.recv(16,socket.MSG_WAITALL)[4]==10"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  cowrie:
+    image: dlp-honeynet-cowrie:local
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.cowrie-isolated
+    networks: [decoys, public-ingress]
+    ports:
+      - "${HONEYNET_PUBLIC_BIND:-127.0.0.1}:${HONEYNET_COWRIE_PORT:-2222}:2222"
+    environment:
+      HONEYNET_COWRIE_PROJECTION: /projection/world.sqlite
+      RESEARCH_AUTOMATIC_DECOYS: ${RESEARCH_AUTOMATIC_DECOYS:-0}
+      HONEYNET_CANARY_HANDOFFS: "1"
+      HONEYNET_SSH_COMMANDS_PER_10S: ${HONEYNET_SSH_COMMANDS_PER_10S:-0}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    volumes:
+      - type: volume
+        source: state
+        target: /projection
+        read_only: true
+        volume:
+          subpath: cowrie
+      - cowrie-config:/cowrie/cowrie-git/etc
+      - cowrie-runtime:/cowrie/cowrie-git/var
+      - cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+    depends_on:
+      visitor:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /cowrie/cowrie-env/bin/python3, -c, "import socket; s=socket.create_connection(('127.0.0.1',2222),2); assert s.recv(4)==b'SSH-'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  bridge:
+    <<: *python
+    command: [bridge]
+    network_mode: none
+    environment:
+      <<: *world-env
+      HONEYNET_FLOW_STATE_FILE: /state/runtime/flow-evidence.sqlite
+      HONEYNET_FLOW_INTERFACE: ${HONEYNET_FLOW_INTERFACE:-}
+      HONEYNET_FLOW_HMAC_KEY: ${HONEYNET_FLOW_HMAC_KEY:-}
+      HONEYNET_EMPLOYEE_SSH_OPS01_SECRET: ${HONEYNET_EMPLOYEE_SSH_OPS01_SECRET:-}
+      HONEYNET_EMPLOYEE_SSH_DEV01_SECRET: ${HONEYNET_EMPLOYEE_SSH_DEV01_SECRET:-}
+    volumes:
+      - *runtime-mount
+      - cowrie-logs:/cowrie-logs:ro
+    depends_on:
+      cowrie:
+        condition: service_started
+
+  probe:
+    <<: *nginx
+    networks: [decoys, management]
+    command: [-c, /etc/nginx/probe.conf]
+    depends_on:
+      visitor:
+        condition: service_healthy
+
+  control:
+    <<: *python
+    command: [control]
+    networks: [management, model-egress]
+    environment:
+      <<: *world-env
+      HONEYNET_CONTROL_TOKEN: ${HONEYNET_CONTROL_TOKEN:?configure HONEYNET_CONTROL_TOKEN}
+      RESEARCH_ASYNC_ADAPTATION: "1"
+      RESEARCH_MODEL_BASE_URL: ${RESEARCH_MODEL_BASE_URL:-https://api.deepseek.com}
+      RESEARCH_MODEL: ${RESEARCH_MODEL:-}
+      RESEARCH_MODEL_API_KEY: ${RESEARCH_MODEL_API_KEY:-}
+      RESEARCH_MODEL_TIMEOUT_SECONDS: ${RESEARCH_MODEL_TIMEOUT_SECONDS:-15}
+      RESEARCH_MODEL_TOTAL_TIMEOUT_SECONDS:
+      RESEARCH_MODEL_DRAFT_MAX_TOKENS:
+      RESEARCH_MODEL_REVIEW_MAX_TOKENS:
+      RESEARCH_MODEL_STREAM:
+      RESEARCH_MODEL_STREAM_USAGE:
+      RESEARCH_MODEL_THINKING:
+      RESEARCH_MODEL_THINKING_FIELD:
+      RESEARCH_MODEL_DAILY_TOKENS:
+      RESEARCH_MODEL_DAILY_COST_MICROUSD:
+      RESEARCH_MODEL_INPUT_MICROUSD_PER_MILLION:
+      RESEARCH_MODEL_OUTPUT_MICROUSD_PER_MILLION:
+      RESEARCH_AUTO_SERVICE_CAPABILITIES: ${RESEARCH_AUTO_SERVICE_CAPABILITIES:-}
+      HONEYNET_RELEASE_MONITOR: "1"
+      HONEYNET_VISITOR_HEALTH_HOST: probe
+      HONEYNET_VISITOR_HEALTH_PORT: "8080"
+      HONEYNET_MYSQL_HEALTH_HOST: probe
+      HONEYNET_MYSQL_PORT: "3307"
+      HONEYNET_MYSQL_HEALTH_PASSWORD: ${HONEYNET_MYSQL_PASSWORD:?configure HONEYNET_MYSQL_PASSWORD}
+      HONEYNET_COWRIE_EXPORT: /state/cowrie/world.sqlite
+      HONEYNET_FLOW_STATE_FILE: /state/runtime/flow-evidence.sqlite
+      HONEYNET_SITUATION_REPORT_FILE: /state/runtime/situations.sqlite
+      HONEYNET_SITUATION_REPORTS: "1"
+      HONEYNET_SITUATION_MODEL: ${HONEYNET_SITUATION_MODEL:-0}
+    volumes: [state:/state]
+    depends_on:
+      probe:
+        condition: service_started
+    healthcheck:
+      test: [CMD, python, -c, "import os; from urllib.request import Request,urlopen; req=Request('http://127.0.0.1:8081/api/research/status',headers={'X-Control-Token':os.environ['HONEYNET_CONTROL_TOKEN']}); assert urlopen(req,timeout=2).status == 200"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  dashboard:
+    <<: *python
+    command: [dashboard]
+    networks: [management, operator-access]
+    ports:
+      - "127.0.0.1:${HONEYNET_DASHBOARD_PORT:-8082}:8082"
+    environment:
+      <<: *world-env
+      HONEYNET_DASHBOARD_PASSWORD: ${HONEYNET_DASHBOARD_PASSWORD:?configure HONEYNET_DASHBOARD_PASSWORD}
+      HONEYNET_DASHBOARD_APPROVER_PASSWORD: ${HONEYNET_DASHBOARD_APPROVER_PASSWORD:-}
+      HONEYNET_VISITOR_PROBE_HOST: probe
+      HONEYNET_VISITOR_PORT: "8080"
+      HONEYNET_VISITOR_HEALTH_HOST: probe
+      HONEYNET_VISITOR_HEALTH_PORT: "8080"
+      HONEYNET_MYSQL_PROBE_HOST: probe
+      HONEYNET_MYSQL_PORT: "3307"
+      HONEYNET_MYSQL_HEALTH_HOST: probe
+      HONEYNET_MYSQL_HEALTH_PASSWORD: ${HONEYNET_MYSQL_PASSWORD:?configure HONEYNET_MYSQL_PASSWORD}
+      HONEYNET_COWRIE_PROBE_HOST: probe
+      HONEYNET_COWRIE_PORT: "2222"
+      HONEYNET_DASHBOARD_PORT: "8082"
+      HONEYNET_COWRIE_EXPORT: /state/cowrie/world.sqlite
+      HONEYNET_EMPLOYEE_ACTIVITY_FILE: /state/runtime/employees.sqlite
+      HONEYNET_FLOW_STATE_FILE: /state/runtime/flow-evidence.sqlite
+      HONEYNET_SITUATION_REPORT_FILE: /state/runtime/situations.sqlite
+      HONEYNET_LATENCY_FILE: /state/runtime/http.sqlite
+    volumes: [state:/state]
+    depends_on:
+      probe:
+        condition: service_started
+    healthcheck:
+      test: [CMD, python, -c, "import base64,os; from urllib.request import Request,urlopen; auth=base64.b64encode(('operator:'+os.environ['HONEYNET_DASHBOARD_PASSWORD']).encode()).decode(); req=Request('http://127.0.0.1:8082/',headers={'Authorization':'Basic '+auth}); assert urlopen(req,timeout=2).status == 200"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  employees:
+    <<: *python
+    profiles: [employees]
+    command: [employees]
+    networks: [decoys]
+    environment:
+      HONEYNET_EMPLOYEE_ACTIVITY_FILE: /state/runtime/employees.sqlite
+      HONEYNET_EMPLOYEE_SSH_HOST: cowrie
+      HONEYNET_EMPLOYEE_MYSQL_HOST: mysql
+      HONEYNET_EMPLOYEE_LLM_HOST: visitor
+      HONEYNET_EMPLOYEE_WEB_HOST: visitor
+      HONEYNET_EMPLOYEE_SSH_KNOWN_HOSTS: /employee/known_hosts
+      HONEYNET_EMPLOYEE_TIMEZONE: ${HONEYNET_EMPLOYEE_TIMEZONE:-Asia/Shanghai}
+      HONEYNET_EMPLOYEE_SSH_OPS01_SECRET: ${HONEYNET_EMPLOYEE_SSH_OPS01_SECRET:-}
+      HONEYNET_EMPLOYEE_SSH_DEV01_SECRET: ${HONEYNET_EMPLOYEE_SSH_DEV01_SECRET:-}
+      HONEYNET_EMPLOYEE_MYSQL_DBA01_SECRET: ${HONEYNET_EMPLOYEE_MYSQL_DBA01_SECRET:-}
+      HONEYNET_EMPLOYEE_MYSQL_TEST01_SECRET: ${HONEYNET_EMPLOYEE_MYSQL_TEST01_SECRET:-}
+      HONEYNET_EMPLOYEE_LLM_BIZ01_SECRET: ${HONEYNET_EMPLOYEE_LLM_BIZ01_SECRET:-}
+      HONEYNET_EMPLOYEE_LLM_MANAGER01_SECRET: ${HONEYNET_EMPLOYEE_LLM_MANAGER01_SECRET:-}
+      HONEYNET_EMPLOYEE_WEB_BIZ01_SECRET: ${HONEYNET_EMPLOYEE_WEB_BIZ01_SECRET:-}
+      HONEYNET_EMPLOYEE_WEB_BIZ01_PASSWORD: ${HONEYNET_EMPLOYEE_WEB_BIZ01_PASSWORD:-}
+      HONEYNET_EMPLOYEE_FAKE_API_TOKEN: ${HONEYNET_EMPLOYEE_FAKE_API_TOKEN:-}
+    volumes:
+      - *runtime-mount
+    depends_on:
+      mysql:
+        condition: service_healthy
+      cowrie:
+        condition: service_healthy
+
+  tools:
+    <<: *python
+    profiles: [tools]
+    network_mode: none
+    restart: "no"
+    environment:
+      HONEYNET_FLOW_STATE_FILE: /state/runtime/flow-evidence.sqlite
+      HONEYNET_FLOW_HMAC_KEY: ${HONEYNET_FLOW_HMAC_KEY:-}
+    volumes: [state:/state]
+    depends_on:
+      init-state:
+        condition: service_completed_successfully
+
+networks:
+  decoys:
+    internal: true
+  management:
+    internal: true
+  model-egress: {}
+  public-ingress: {}
+  operator-access: {}
+
+volumes:
+  state:
+  cowrie-config:
+  cowrie-runtime:
+  cowrie-logs:

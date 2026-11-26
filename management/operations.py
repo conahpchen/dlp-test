@@ -29,14 +29,15 @@ def _probe(name, env, protocol, path=None):
               "status": "unconfigured" if port is None else "unreachable"}
     if port is None:
         return result
+    host = os.environ.get(env.removesuffix("_PORT") + "_PROBE_HOST", "127.0.0.1")
     try:
         if path:
             with httpx.Client(timeout=1, trust_env=False) as client:
-                response = client.get(f"http://127.0.0.1:{port}{path}")
+                response = client.get(f"http://{host}:{port}{path}")
                 # An authentication challenge proves the intended isolated listener is responding.
                 result["status"] = "responding" if response.status_code in (200, 401) else "unexpected"
         else:
-            with socket.create_connection(("127.0.0.1", port), timeout=1) as connection:
+            with socket.create_connection((host, port), timeout=1) as connection:
                 prefix = connection.recv(16, socket.MSG_WAITALL)
                 valid = prefix.startswith(b"SSH-") if protocol == "SSH" else len(prefix) >= 5 and prefix[4] == 10
                 result["status"] = "responding" if valid else "unexpected"
