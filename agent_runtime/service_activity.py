@@ -28,6 +28,10 @@ LLM_TASKS = {"read_handbook": "请提供运维手册和业务支持说明。",
              "review_service_inventory": "请汇总平台服务和资产目录。"}
 
 
+def _endpoint(service):
+    return os.environ.get(f"HONEYNET_EMPLOYEE_{service.upper()}_HOST", "127.0.0.1")
+
+
 def _ssh(port, username, secret, task, _trace):
     if "\n" in secret or "\r" in secret:
         raise ValueError("Invalid SSH password")
@@ -44,7 +48,7 @@ def _ssh(port, username, secret, task, _trace):
              "-o", "PasswordAuthentication=yes", "-o", "PubkeyAuthentication=no",
              "-o", "KbdInteractiveAuthentication=no", "-o", "NumberOfPasswordPrompts=1",
              "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=3", "-p", str(port),
-             f"{username}@127.0.0.1", SSH_TASKS[task]],
+             f"{username}@{_endpoint('ssh')}", SSH_TASKS[task]],
             stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=8,
             env={"PATH": os.defpath, "DISPLAY": "honeynet", "SSH_ASKPASS": str(askpass),
                  "SSH_ASKPASS_REQUIRE": "force", "HONEYNET_EMPLOYEE_ASKPASS": secret},
@@ -58,7 +62,7 @@ def _ssh(port, username, secret, task, _trace):
 
 
 def _mysql(port, username, secret, task, _trace):
-    with pymysql.connect(host="127.0.0.1", port=port, user=username, password=secret,
+    with pymysql.connect(host=_endpoint("mysql"), port=port, user=username, password=secret,
                          connect_timeout=3, read_timeout=4, write_timeout=4) as db:
         with db.cursor() as cursor:
             cursor.execute(MYSQL_TASKS[task])
@@ -72,7 +76,7 @@ def _llm(port, username, secret, task, trace):
     token = os.environ.get("HONEYNET_EMPLOYEE_FAKE_API_TOKEN", "")
     if not token or len(secret) < 16:
         raise ValueError("Employee fake API credentials are required")
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=5, trust_env=False) as client:
+    with httpx.Client(base_url=f"http://{_endpoint('llm')}:{port}", timeout=5, trust_env=False) as client:
         model = next(row["id"] for row in client.get("/v1/models").raise_for_status().json()["data"])
         body = {"model": model, "messages": [{"role": "user", "content": LLM_TASKS[task]}]}
         response = client.post("/v1/chat/completions", json=body, headers={
@@ -93,7 +97,7 @@ def _web(port, username, secret, task, trace):
     def headers(method, path):
         return {"X-Session": trace, "X-Employee-Proof": web_proof(username, secret, trace, method, path)}
 
-    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=5, trust_env=False) as client:
+    with httpx.Client(base_url=f"http://{_endpoint('web')}:{port}", timeout=5, trust_env=False) as client:
         login = client.post("/api/login", json={"username": username, "password": password},
                             headers=headers("POST", "/api/login")).raise_for_status().json()
         tickets = client.get("/api/tickets", headers={

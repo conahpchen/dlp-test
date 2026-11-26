@@ -1,0 +1,19 @@
+services:
+  cowrie:
+    volumes:
+      - type: bind
+        source: ${HONEYNET_EMPLOYEE_COWRIE_USERDB:?set absolute path to the Cowrie userdb file}
+        target: /cowrie/cowrie-git/etc/userdb.txt
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
+  employees:
+    volumes:
+      - type: bind
+        source: ${HONEYNET_EMPLOYEE_KNOWN_HOSTS_FILE:?set absolute path to verified Cowrie known_hosts}
+        target: /employee/known_hosts
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: Z
