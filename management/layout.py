@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 ROOT = Path(__file__).parent
 NAV = (
     ("监测与调查", (("/", "运行总览", "▦"), ("/alerts", "告警中心", "◉"),
-                  ("/evidence", "会话证据", "⌘"), ("/chains", "攻击链路", "⇢"),
+                  ("/evidence", "会话证据", "⌘"), ("/profiles", "攻击者画像", "◎"), ("/chains", "攻击链路", "⇢"),
                   ("/canary", "Canary 凭据", "◇"), ("/situations", "态势报告", "≋"),
                   ("/responses", "证据处置", "◈"))),
     ("环境与发布", (("/operations", "服务与运行", "▤"), ("/world", "DWS 世界", "◫"),

@@ -39,3 +39,38 @@ def analyze(events):
                              limitations=['Headers and links can be copied or spoofed; human/AI identity is unverified.',
                                           'A canary request proves HTTP access only, not command execution.']))
     return profiles
+
+
+AGENT_SIGNALS = frozenset({
+    "untrusted_agent_self_identification",
+    "multi_target_probe",
+    "service_discovery",
+})
+
+
+def session_agent_assessments(events, decisions):
+    """Read retained evidence without combining sessions or requesting a fresh model judgment."""
+    sessions = defaultdict(dict)
+    for event in events:
+        sessions[event["session"]][event["event_id"]] = event
+    latest = {row["session"]: row.get("decision") or {} for row in decisions if row["status"] == "applied"}
+
+    assessments = {}
+    for session, observed in sessions.items():
+        # The general scanner rule can aggregate by source network. Limit it to this session here.
+        profile, = analyze(list(observed.values()))
+        signals = defaultdict(set)
+        for item in profile["evidence"]:
+            if item["indicator"] in AGENT_SIGNALS:
+                signals[item["indicator"]].update(item["event_ids"])
+        decision = latest.get(session, {})
+        citations = set(decision.get("evidence_event_ids") or ())
+        model_suspects_agent = bool(citations and citations <= observed.keys()
+                                    and decision.get("actor_hypothesis") == "ai_agent_suspected")
+        if model_suspects_agent:
+            signals["model_agent_hypothesis"] = citations
+        assessments[session] = {
+            "suspected": model_suspects_agent,
+            "signals": {kind: sorted(ids, reverse=True) for kind, ids in signals.items()},
+        }
+    return assessments
